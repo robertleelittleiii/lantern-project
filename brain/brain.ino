@@ -20,7 +20,7 @@
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 const int   PIR_PIN          = 27;
-const unsigned long MOTION_TIMEOUT_MS = 45000;  // ms of no motion → return to ambient
+const unsigned long MOTION_TIMEOUT_MS = 10000;  // ms of no motion → return to ambient
 
 // ── State ─────────────────────────────────────────────────────────────────────
 bool  motionActive   = false;
@@ -95,11 +95,13 @@ void setup() {
     char buf[256];
     unsigned long now = millis();
     unsigned long idle = motionActive ? (now - lastMotionTime) / 1000 : 0;
+    int pirRaw = digitalRead(PIR_PIN);
     snprintf(buf, sizeof(buf),
-      "{\"uptime_s\":%lu,\"motion\":%s,\"idle_s\":%lu,\"ip\":\"%s\"}",
+      "{\"uptime_s\":%lu,\"motion\":%s,\"idle_s\":%lu,\"pir_pin\":%d,\"ip\":\"%s\"}",
       now / 1000,
       motionActive ? "true" : "false",
       idle,
+      pirRaw,
       WiFi.localIP().toString().c_str());
     server.send(200, "application/json", buf);
   });
