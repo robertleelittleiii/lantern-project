@@ -14,6 +14,7 @@
 
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <WebServer.h>
 #include "config.h"
 
@@ -44,24 +45,31 @@ void ensureWiFi() {
   }
 }
 
-// Activate a WLED preset using the simple HTTP API
+// Activate a WLED preset using the JSON API
 void setPreset(int preset) {
   ensureWiFi();
   if (WiFi.status() != WL_CONNECTED) return;
 
   HTTPClient http;
-  char url[80];
-  snprintf(url, sizeof(url), "http://%s/win?PL=%d", WLED_IP, preset);
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s/json/state", WLED_IP);
+
+  // Build JSON payload: {"ps": <preset>}
+  StaticJsonDocument<64> doc;
+  doc["ps"] = preset;
+  String body;
+  serializeJson(doc, body);
 
   http.begin(url);
   http.setTimeout(5000);
-  int code = http.GET();
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(body);
 
   if (code > 0) {
-    http.getString();  // response is small (~200 bytes XML)
+    http.getString();  // consume response body to free resources
     Serial.printf("Preset %d activated (HTTP %d)\n", preset, code);
   } else {
-    Serial.printf("WLED request failed: %s\n", http.errorToString(code).c_str());
+    Serial.printf("WLED POST failed: %s\n", http.errorToString(code).c_str());
   }
   http.end();
   delay(10);  // yield to watchdog
