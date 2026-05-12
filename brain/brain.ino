@@ -3,7 +3,7 @@
  * Hardware: ESP32 DevKit
  *
  * Wiring:
- *  - PIR HC-SR501  OUT --> GPIO 13
+ *  - PIR HC-SR501  OUT --> GPIO 27
  *  - PIR HC-SR501  VCC --> 5V
  *  - PIR HC-SR501  GND --> GND
  *
@@ -14,16 +14,17 @@
 
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h>
+#include <WebServer.h>
 #include "config.h"
 
 // ── Settings ─────────────────────────────────────────────────────────────────
-const int   PIR_PIN          = 13;
+const int   PIR_PIN          = 27;
 const unsigned long MOTION_TIMEOUT_MS = 45000;  // ms of no motion → return to ambient
 
 // ── State ─────────────────────────────────────────────────────────────────────
 bool  motionActive   = false;
 unsigned long lastMotionTime = 0;
+WebServer server(80);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 void ensureWiFi() {
@@ -43,31 +44,27 @@ void ensureWiFi() {
   }
 }
 
-// Activate a WLED preset using the JSON API
+// Activate a WLED preset using the simple HTTP API
 void setPreset(int preset) {
   ensureWiFi();
   if (WiFi.status() != WL_CONNECTED) return;
 
   HTTPClient http;
-  char url[64];
-  snprintf(url, sizeof(url), "http://%s/json/state", WLED_IP);
-
-  // Build JSON payload: {"ps": <preset>}
-  StaticJsonDocument<64> doc;
-  doc["ps"] = preset;
-  String body;
-  serializeJson(doc, body);
+  char url[80];
+  snprintf(url, sizeof(url), "http://%s/win?PL=%d", WLED_IP, preset);
 
   http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(body);
+  http.setTimeout(5000);
+  int code = http.GET();
 
   if (code > 0) {
+    http.getString();  // response is small (~200 bytes XML)
     Serial.printf("Preset %d activated (HTTP %d)\n", preset, code);
   } else {
-    Serial.printf("WLED POST failed: %s\n", http.errorToString(code).c_str());
+    Serial.printf("WLED request failed: %s\n", http.errorToString(code).c_str());
   }
   http.end();
+  delay(10);  // yield to watchdog
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -84,6 +81,21 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nConnected: " + WiFi.localIP().toString());
+
+  // Status endpoint for network monitoring
+  server.on("/status", []() {
+    char buf[256];
+    unsigned long now = millis();
+    unsigned long idle = motionActive ? (now - lastMotionTime) / 1000 : 0;
+    snprintf(buf, sizeof(buf),
+      "{\"uptime_s\":%lu,\"motion\":%s,\"idle_s\":%lu,\"ip\":\"%s\"}",
+      now / 1000,
+      motionActive ? "true" : "false",
+      idle,
+      WiFi.localIP().toString().c_str());
+    server.send(200, "application/json", buf);
+  });
+  server.begin();
 
   // Start in ambient mode
   setPreset(1);
@@ -108,5 +120,6 @@ void loop() {
     motionActive = false;
   }
 
+  server.handleClient();
   delay(100);
 }

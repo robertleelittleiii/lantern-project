@@ -36,6 +36,6 @@ project-synopsis.md  # Full project design document
 
 | Component         | GPIO |
 |-------------------|------|
-| PIR HC-SR501 OUT  | 13   |
+| PIR HC-SR501 OUT  | 27   |
 | PIR HC-SR501 VCC  | 5V   |
 | PIR HC-SR501 GND  | GND  |
