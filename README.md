@@ -15,14 +15,14 @@ See `project-synopsis.md` for full hardware details and design decisions.
 ```
 brain/
   brain.ino          # Brain ESP32 sketch (upload this one)
-config.h             # WiFi + WLED credentials (gitignored — copy from config.h.example)
-config.h.example     # Credentials template
+brain/config.h         # WiFi + WLED credentials (gitignored — copy from config.h.example)
+  brain/config.h.example # Credentials template
 project-synopsis.md  # Full project design document
 ```
 
 ## Setup
 
-1. Copy `config.h.example` to `config.h` and fill in your credentials
+1. Copy `brain/config.h.example` to `brain/config.h` and fill in your credentials
 2. In the Arduino IDE:
    - Install board support: **esp32 by Espressif Systems** via Boards Manager
    - Install library: **ArduinoJson by Benoit Blanchon** via Library Manager
