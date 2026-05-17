@@ -78,51 +78,53 @@
 - Segment colors must be set per-segment (new segments default to pure white [255,255,255])
 - Warm white reference: [255, 248, 247]
 
-## Future Work — 3-Sensor Directional System
+## 3-Sensor Directional System (Implemented)
 
-### Hardware Needed
-- 2 additional HC-SR501 PIR sensors
-- GPIO assignments: Front=27, Middle=25, Back=26 (suggested)
-- 10 total lanterns (6 more rings to add)
+### Hardware
+- 3× HC-SR501 PIR sensors: Front (GPIO 27), Middle (GPIO 25), Back (GPIO 26)
+- All use INPUT_PULLDOWN to prevent false reads when disconnected
+- 4 lanterns (32 LEDs, 4× 8-LED segments) currently; expanding to 10
 
-### Directional Logic Design
-Three sensors: **Front**, **Middle**, **Back** — placed along the walkway.
+### Directional Logic (Current Implementation)
+Uses rising-edge detection on each sensor and tracks `lastSensor` for direction:
+- **Front fires (new)** → wave bright 0→N-1
+- **Back fires (new)** → wave bright N-1→0
+- **Middle fires (new)** → wave bright outward from center
+- **Front→Middle** → continue forward, light remaining back segments
+- **Back→Middle** → continue backward, light remaining front segments
+- **Middle→Front** → dim back segments (trailing behind person)
+- **Middle→Back** → dim front segments (trailing behind person)
+- **Timeout** → dim segments in the order they were originally lit
 
-**Single person scenarios:**
-- Front sensor → wave lights front→middle
-- Back sensor → wave lights back→middle
-- Middle sensor → wave lights outward to both ends
-- Front then Middle → continue wave front→middle→back
-- Back then Middle → continue wave back→middle→front
-- Middle then Front → person heading to front, back segments return to ambient
-- Middle then Back → person heading to back, front segments return to ambient
+### Per-Segment State Tracking
+- `segBright[]` — tracks bright/ambient state per segment
+- `litOrder[]` / `litCount` — records order segments were lit for trailing dim
+- `lightSeg()` skips already-lit segments, `dimSeg()` skips already-dim segments
 
-**Two people (opposite directions):**
-- Front + Back sensors fire → two waves converge toward middle
-- Both waves reach middle → all segments bright
-- People pass each other → segments trail to ambient behind each person
+### Status Endpoint
+- `/status` now returns all 3 PIR readings (`pir_f`, `pir_m`, `pir_b`), direction (`dir`), and segment count
+- Web UI status bar shows: `F:0 M:0 B:0 | MOTION front | 5s`
 
-### Architecture Changes Required
-The current single-boolean `motionActive` state won't work. Needs:
+## Future Work
 
-1. **Per-segment state** — each segment independently tracks bright/ambient
-2. **Direction tracking** — sensor activation order determines wave direction
-3. **Independent wave timers** — two waves can run simultaneously
-4. **Segment ownership** — when waves overlap, most recent trigger wins
-5. **Sensor-to-segment zone mapping** — which segments each sensor "covers"
+### Sensor Zone Configuration (Web UI)
+Currently the sensor-to-segment mapping is implicit (front=seg 0 side, back=seg N side, middle=center). For the real walkway install, the web UI needs:
+- **Sensor position config** — which segment each sensor is nearest to
+- **Zone size** — how many segments each sensor covers
+- **Segment ordering** — whether physical order matches segment numbering
+- **Per-sensor enable/disable** — for testing with fewer than 3 sensors
+- Store via `/config` API and persist across reboots (ESP32 Preferences/NVS)
 
 ### Suggested Zone Mapping (10 lanterns)
 - Front zone: segments 0–2 (3 lanterns near front sensor)
 - Middle zone: segments 3–6 (4 lanterns near middle sensor)
 - Back zone: segments 7–9 (3 lanterns near back sensor)
 
-### Implementation Approach
-- Replace `motionActive` boolean with per-sensor state structs
-- Track `lastTriggerTime` per sensor
-- Determine direction from sensor pair activation order and timing
-- State machine: IDLE → WAVE_FORWARD → WAVE_BACKWARD → WAVE_BOTH → TRAILING
-- Wave functions take start/end segment and direction as parameters
-- Settings persistence via ESP32 Preferences (NVS) — currently settings reset on reboot
+### Other Planned Improvements
+- **Settings persistence** via ESP32 Preferences (NVS) — currently settings reset on reboot
+- **Non-blocking waves** — current wave functions use `delay()`, blocking sensor reads during wave sequences
+- **Two-person handling** — Front + Back simultaneous activation, converging waves
+- **Transition effects** — gradual brightness fade rather than instant switch
 
 ## Commit History
 - `2bb511f` — Initial commit: Brain ESP32 prototype, project docs, config template

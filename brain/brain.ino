@@ -1,15 +1,12 @@
 /*
- * Lantern Brain — Sequential Segment Test (1 PIR, 2 lanterns)
+ * Lantern Brain — 3-Sensor Directional Wave System
  * Hardware: ESP32 DevKit
  *
  * Wiring:
- *  - PIR HC-SR501  OUT --> GPIO 27
- *  - PIR HC-SR501  VCC --> 5V
- *  - PIR HC-SR501  GND --> GND
- *
- * WLED Segments (configure in WLED UI):
- *  - Segment 0: LEDs 0–7   (lantern 1)
- *  - Segment 1: LEDs 8–15  (lantern 2)
+ *  - PIR Front   OUT --> GPIO 27
+ *  - PIR Middle  OUT --> GPIO 25
+ *  - PIR Back    OUT --> GPIO 26
+ *  - All PIR     VCC --> 5V, GND --> GND
  *
  * Web UI: http://<brain-ip>/  — configure effects and timing
  */
@@ -21,8 +18,11 @@
 #include "config.h"
 
 // ── Fixed Settings ───────────────────────────────────────────────────────────
-const int PIR_PIN      = 27;
-int       numSegments  = 0;  // auto-detected from WLED at startup
+const int PIR_FRONT  = 27;
+const int PIR_MIDDLE = 25;
+const int PIR_BACK   = 26;
+#define MAX_SEG 16
+int       numSegments = 0;  // auto-detected from WLED at startup
 
 // ── Tunable Settings (changeable via web UI) ─────────────────────────────────
 int           briBright    = 255;
@@ -33,8 +33,14 @@ unsigned long motionTimeout = 10000; // ms
 int           waveDelay    = 500;    // ms between segment changes
 
 // ── State ─────────────────────────────────────────────────────────────────────
-bool  motionActive   = false;
-unsigned long lastMotionTime = 0;
+enum SensorId { S_NONE, S_FRONT, S_MIDDLE, S_BACK };
+bool  motionActive    = false;
+unsigned long lastAnyMotionTime = 0;
+SensorId lastSensor   = S_NONE;       // last sensor that triggered
+bool segBright[MAX_SEG];              // per-segment bright/ambient state
+int  litOrder[MAX_SEG];               // order segments were lit (for trailing dim)
+int  litCount         = 0;
+bool prevFront = false, prevMiddle = false, prevBack = false;
 WebServer server(80);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -88,24 +94,74 @@ void setSegment(int segId, int bri, int fx) {
   delay(10);
 }
 
-void waveOn() {
-  for (int i = 0; i < numSegments; i++) {
-    setSegment(i, briBright, fxBright);
-    if (i < numSegments - 1) delay(waveDelay);
+// ── Directional wave helpers ─────────────────────────────────────────────────
+
+// Light a single segment and record the order
+void lightSeg(int seg) {
+  if (seg < 0 || seg >= numSegments || segBright[seg]) return;
+  setSegment(seg, briBright, fxBright);
+  segBright[seg] = true;
+  litOrder[litCount++] = seg;
+}
+
+// Dim a single segment
+void dimSeg(int seg) {
+  if (seg < 0 || seg >= numSegments || !segBright[seg]) return;
+  setSegment(seg, briAmbient, fxAmbient);
+  segBright[seg] = false;
+}
+
+// Wave bright from segment `from` to segment `to` (inclusive)
+void waveBright(int from, int to) {
+  int step = (from <= to) ? 1 : -1;
+  for (int i = from; ; i += step) {
+    lightSeg(i);
+    if (i == to) break;
+    delay(waveDelay);
   }
 }
 
-void waveOff() {
-  for (int i = 0; i < numSegments; i++) {
-    setSegment(i, briAmbient, fxAmbient);
-    if (i < numSegments - 1) delay(waveDelay);
+// Wave ambient from segment `from` to segment `to` (inclusive)
+void waveAmbient(int from, int to) {
+  int step = (from <= to) ? 1 : -1;
+  for (int i = from; ; i += step) {
+    dimSeg(i);
+    if (i == to) break;
+    delay(waveDelay);
   }
+}
+
+// Wave bright outward from the middle
+void waveBrightFromMiddle() {
+  int mid = numSegments / 2;
+  for (int offset = 0; offset < numSegments; offset++) {
+    int left  = mid - 1 - offset;
+    int right = mid + offset;
+    if (left >= 0)            lightSeg(left);
+    if (right < numSegments)  lightSeg(right);
+    if (left > 0 || right < numSegments - 1) delay(waveDelay);
+  }
+}
+
+// Dim segments in the order they were originally lit (trailing effect)
+void dimInLitOrder() {
+  bool first = true;
+  for (int i = 0; i < litCount; i++) {
+    if (segBright[litOrder[i]]) {
+      if (!first) delay(waveDelay);
+      dimSeg(litOrder[i]);
+      first = false;
+    }
+  }
+  litCount = 0;
 }
 
 void applyAmbient() {
   for (int i = 0; i < numSegments; i++) {
     setSegment(i, briAmbient, fxAmbient);
+    segBright[i] = false;
   }
+  litCount = 0;
 }
 
 // Query WLED for segment count
@@ -247,7 +303,7 @@ async function pollStatus(){
   try{
     const r=await fetch('/status');const d=await r.json();
     document.getElementById('status').textContent=
-      'Uptime: '+d.uptime_s+'s | Motion: '+(d.motion?'YES':'no')+' | PIR: '+d.pir_pin+' | Idle: '+d.idle_s+'s';
+      'Up:'+d.uptime_s+'s | F:'+d.pir_f+' M:'+d.pir_m+' B:'+d.pir_b+' | '+(d.motion?'MOTION '+d.dir:'idle')+' | '+d.idle_s+'s';
   }catch(e){}
 }
 init();
@@ -259,7 +315,10 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  pinMode(PIR_PIN, INPUT_PULLDOWN);
+  pinMode(PIR_FRONT, INPUT_PULLDOWN);
+  pinMode(PIR_MIDDLE, INPUT_PULLDOWN);
+  pinMode(PIR_BACK, INPUT_PULLDOWN);
+  memset(segBright, false, sizeof(segBright));
 
   Serial.print("Connecting to WiFi");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -322,16 +381,22 @@ void setup() {
 
   // ── Status endpoint ──
   server.on("/status", []() {
-    char buf[256];
+    char buf[384];
     unsigned long now = millis();
-    unsigned long idle = motionActive ? (now - lastMotionTime) / 1000 : 0;
-    int pirRaw = digitalRead(PIR_PIN);
+    unsigned long idle = motionActive ? (now - lastAnyMotionTime) / 1000 : 0;
+    const char* dirStr = "none";
+    if (lastSensor == S_FRONT) dirStr = "front";
+    else if (lastSensor == S_MIDDLE) dirStr = "middle";
+    else if (lastSensor == S_BACK) dirStr = "back";
     snprintf(buf, sizeof(buf),
-      "{\"uptime_s\":%lu,\"motion\":%s,\"idle_s\":%lu,\"pir_pin\":%d,\"ip\":\"%s\"}",
+      "{\"uptime_s\":%lu,\"motion\":%s,\"idle_s\":%lu,"
+      "\"pir_f\":%d,\"pir_m\":%d,\"pir_b\":%d,"
+      "\"dir\":\"%s\",\"segs\":%d,\"ip\":\"%s\"}",
       now / 1000,
       motionActive ? "true" : "false",
       idle,
-      pirRaw,
+      digitalRead(PIR_FRONT), digitalRead(PIR_MIDDLE), digitalRead(PIR_BACK),
+      dirStr, numSegments,
       WiFi.localIP().toString().c_str());
     server.send(200, "application/json", buf);
   });
@@ -353,20 +418,74 @@ void setup() {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 void loop() {
-  bool pirHigh = digitalRead(PIR_PIN) == HIGH;
+  bool front  = digitalRead(PIR_FRONT)  == HIGH;
+  bool middle = digitalRead(PIR_MIDDLE) == HIGH;
+  bool back   = digitalRead(PIR_BACK)   == HIGH;
+  bool anyMotion = front || middle || back;
 
-  if (pirHigh) {
-    lastMotionTime = millis();
+  if (anyMotion) lastAnyMotionTime = millis();
 
+  // Detect rising edges (new activations)
+  bool frontRise  = front  && !prevFront;
+  bool middleRise = middle && !prevMiddle;
+  bool backRise   = back   && !prevBack;
+  prevFront = front; prevMiddle = middle; prevBack = back;
+
+  int mid = numSegments / 2;
+
+  // ── Front sensor activated ──
+  if (frontRise) {
     if (!motionActive) {
-      Serial.println("Motion detected → wave on");
-      waveOn();
+      Serial.println("Front → wave forward");
+      waveBright(0, numSegments - 1);
       motionActive = true;
+    } else if (lastSensor == S_MIDDLE) {
+      // Middle → Front: person heading to front, dim back segments
+      Serial.println("Middle→Front: dim back");
+      waveAmbient(numSegments - 1, mid);
     }
-  } else if (motionActive && (millis() - lastMotionTime >= motionTimeout)) {
-    Serial.println("Motion ended → wave off");
-    waveOff();
+    lastSensor = S_FRONT;
+  }
+
+  // ── Middle sensor activated ──
+  if (middleRise) {
+    if (!motionActive) {
+      Serial.println("Middle → wave outward");
+      waveBrightFromMiddle();
+      motionActive = true;
+    } else if (lastSensor == S_FRONT) {
+      // Front → Middle: continue forward, light remaining back segments
+      Serial.println("Front→Middle: light back");
+      waveBright(mid, numSegments - 1);
+    } else if (lastSensor == S_BACK) {
+      // Back → Middle: continue backward, light remaining front segments
+      Serial.println("Back→Middle: light front");
+      waveBright(mid - 1, 0);
+    }
+    lastSensor = S_MIDDLE;
+  }
+
+  // ── Back sensor activated ──
+  if (backRise) {
+    if (!motionActive) {
+      Serial.println("Back → wave backward");
+      waveBright(numSegments - 1, 0);
+      motionActive = true;
+    } else if (lastSensor == S_MIDDLE) {
+      // Middle → Back: person heading to back, dim front segments
+      Serial.println("Middle→Back: dim front");
+      waveAmbient(0, mid - 1);
+    }
+    lastSensor = S_BACK;
+  }
+
+  // ── Timeout: all sensors quiet ──
+  if (motionActive && !anyMotion &&
+      (millis() - lastAnyMotionTime >= motionTimeout)) {
+    Serial.println("Timeout → trailing dim");
+    dimInLitOrder();
     motionActive = false;
+    lastSensor = S_NONE;
   }
 
   server.handleClient();
