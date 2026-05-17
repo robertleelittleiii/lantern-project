@@ -178,7 +178,7 @@ button{width:100%;padding:12px;margin:8px 0;border:none;border-radius:6px;font-s
   <label>Motion Timeout <span class="val" id="vt"></span></label>
   <input type="range" id="timeout" min="1" max="60" step="1">
   <label>Wave Delay <span class="val" id="vw"></span></label>
-  <input type="range" id="wave" min="100" max="2000" step="50">
+  <input type="range" id="wave" min="100" max="10000" step="100">
 </div>
 
 <button id="apply" onclick="apply()">Apply &amp; Save</button>
@@ -219,7 +219,7 @@ function updateLabels(){
   document.getElementById('vm-fx').textContent=fx[document.getElementById('m-fx').value]||'';
   document.getElementById('vm-bri').textContent=document.getElementById('m-bri').value;
   document.getElementById('vt').textContent=document.getElementById('timeout').value+'s';
-  document.getElementById('vw').textContent=document.getElementById('wave').value+'ms';
+  const wv=document.getElementById('wave').value;document.getElementById('vw').textContent=wv>=1000?(wv/1000)+'s':wv+'ms';
 }
 document.querySelectorAll('input,select').forEach(el=>el.addEventListener('input',updateLabels));
 
@@ -259,7 +259,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  pinMode(PIR_PIN, INPUT);
+  pinMode(PIR_PIN, INPUT_PULLDOWN);
 
   Serial.print("Connecting to WiFi");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
