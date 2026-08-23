@@ -264,7 +264,7 @@ void attachHttpLogMiddleware() {
   server.addMiddleware([](WebServer& s, Middleware::Callback next) {
     String uri = s.uri();
     if (uri == "/status" || uri == "/schedule" || uri == "/log" ||
-        uri == "/update/check" || uri == "/update/progress") return next();
+        uri == "/update/check" || uri == "/update/progress" || uri == "/geo") return next();
     uint32_t t0 = millis();
     bool ok = next();
     Log.printf("HTTP %s %s -> %d %lums\n",
@@ -1176,6 +1176,7 @@ input[type=color]{width:100%;height:38px;border:none;border-radius:4px;cursor:po
     <label>Longitude <span style="color:#555;font-size:.8em">(decimal, e.g. -74.00)</span></label>
     <input type="number" id="sched-lon" step="0.001" min="-180" max="180" class="num-input">
     <button id="btn-geo" onclick="grabLocation()" style="background:#2d4059;color:#eee;font-size:.85em;padding:8px;margin:4px 0">&#128205; Use My Location</button>
+    <div style="font-size:.75em;color:#555;margin-top:4px">Browsers block GPS on http:// pages. This button will use network location instead, or type coordinates from a maps app.</div>
   </div>
   <div id="sched-custom">
     <label>Lights On at</label>
@@ -1304,23 +1305,46 @@ async function clearSim(){
   document.getElementById('sim-badge').style.display='none';
   await fetch('/simulate?sensor=clear');
 }
-function grabLocation(){
+function applyLatLon(lat,lon,note){
+  document.getElementById('sched-lat').value=Number(lat).toFixed(5);
+  document.getElementById('sched-lon').value=Number(lon).toFixed(5);
+  if(note) document.getElementById('sched-info').textContent=note;
+}
+async function geoFromIp(){
+  const r=await fetch('/geo');
+  const d=await r.json();
+  if(!d.ok) throw new Error(d.error||'ip lookup failed');
+  const place=[d.city,d.region,d.country].filter(Boolean).join(', ');
+  applyLatLon(d.lat,d.lon,'Approx. '+place+' (from network IP). Click Apply & Save.');
+}
+async function grabLocation(){
   const btn=document.getElementById('btn-geo');
-  if(!navigator.geolocation){document.getElementById('sched-info').textContent='Geolocation not supported by this browser.';return;}
-  btn.disabled=true;btn.textContent='\ud83d\udccd Locating...';
-  navigator.geolocation.getCurrentPosition(
-    function(p){
-      document.getElementById('sched-lat').value=p.coords.latitude.toFixed(5);
-      document.getElementById('sched-lon').value=p.coords.longitude.toFixed(5);
-      btn.disabled=false;btn.textContent='\ud83d\udccd Use My Location';
-    },
-    function(e){
-      btn.disabled=false;btn.textContent='\ud83d\udccd Use My Location';
-      const m={1:'Location permission denied.',2:'Location unavailable \u2014 most browsers require HTTPS for this feature.',3:'Location request timed out.'};
-      document.getElementById('sched-info').textContent=m[e.code]||'Location error.';
-    },
-    {timeout:10000,maximumAge:300000}
-  );
+  const info=document.getElementById('sched-info');
+  btn.disabled=true;btn.textContent='\ud83d\udccd Locating\u2026';
+  const finish=()=>{btn.disabled=false;btn.textContent='\ud83d\udccd Use My Location';};
+  const secure=window.isSecureContext===true;
+  if(secure && navigator.geolocation){
+    navigator.geolocation.getCurrentPosition(
+      function(p){
+        applyLatLon(p.coords.latitude,p.coords.longitude,'GPS location set. Click Apply & Save.');
+        finish();
+      },
+      async function(e){
+        try{await geoFromIp();}
+        catch(err){
+          const m={1:'Location permission denied.',2:'Location unavailable.',3:'Location request timed out.'};
+          info.textContent=(m[e.code]||'Location error.')+' Enter lat/lon manually.';
+        }
+        finish();
+      },
+      {timeout:8000,maximumAge:300000}
+    );
+    return;
+  }
+  info.textContent='GPS needs HTTPS \u2014 using network location\u2026';
+  try{await geoFromIp();}
+  catch(e){info.textContent='Could not guess location. Paste latitude and longitude from a maps app, then Apply & Save.';}
+  finish();
 }
 function updateSchedUI(){
   const m=+document.getElementById('sched-mode').value;
@@ -2217,6 +2241,38 @@ void setup() {
       otaInProgress = false;
       Log.println("HTTP update aborted");
     }
+  });
+
+  server.on("/geo", HTTP_GET, []() {
+    HTTPClient http;
+    http.setTimeout(6000);
+    http.setUserAgent("LanternBrain");
+    if (!http.begin("http://ip-api.com/json/?fields=status,message,lat,lon,city,regionName,country")) {
+      server.send(502, "application/json", "{\"ok\":false,\"error\":\"begin failed\"}");
+      return;
+    }
+    int code = http.GET();
+    String body = (code > 0) ? http.getString() : "";
+    http.end();
+    StaticJsonDocument<256> out;
+    out["ok"] = false;
+    if (code == 200) {
+      StaticJsonDocument<384> geo;
+      if (!deserializeJson(geo, body) && String(geo["status"] | "") == "success") {
+        out["ok"] = true;
+        out["lat"] = geo["lat"];
+        out["lon"] = geo["lon"];
+        out["city"] = geo["city"] | "";
+        out["region"] = geo["regionName"] | "";
+        out["country"] = geo["country"] | "";
+      } else {
+        out["error"] = geo["message"] | "lookup failed";
+      }
+    } else {
+      out["error"] = code;
+    }
+    String json; serializeJson(out, json);
+    server.send(200, "application/json", json);
   });
 
   // ── Schedule endpoint ──
