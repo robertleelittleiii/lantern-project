@@ -1,8 +1,14 @@
 #pragma once
 
-// ── WiFi ──────────────────────────────────────────────────────────────────────
+// ── WiFi (factory defaults) ──────────────────────────────────────────────
+// These values are used on first boot (or if NVS credentials are cleared).
+// At runtime the device reads its SSID/password from NVS flash, which can be
+// updated from the web UI (Network section) or via the LanternBrain-Setup AP.
 #define WIFI_SSID     "YOUR_WIFI_SSID"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 
-// ── WLED ──────────────────────────────────────────────────────────────────────
-#define WLED_IP       "192.168.1.XXX"   // ← IP of your WLED ESP32
+// ── WLED (factory default) ───────────────────────────────────────────────
+// Used on first boot. At runtime the Brain discovers WLED hosts on the LAN
+// (mDNS + optional subnet scan) and stores the selected IP in NVS. You can
+// also type any IPv4 in the web UI (WLED Controller section).
+#define WLED_IP       "192.168.1.XXX"   // ← fallback IP of your WLED ESP32

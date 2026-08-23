@@ -1,0 +1,80 @@
+name: Firmware
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "brain/**"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "brain/**"
+      - ".github/workflows/firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache Arduino cores and libs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-esp32-${{ runner.os }}-${{ hashFiles('.github/workflows/firmware.yml') }}
+
+      - name: Install ESP32 core and ArduinoJson
+        env:
+          ESP32_URL: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli core update-index --additional-urls "$ESP32_URL"
+          arduino-cli core install esp32:esp32 --additional-urls "$ESP32_URL"
+          arduino-cli lib install ArduinoJson
+
+      - name: Compile Brain firmware
+        run: |
+          cp brain/config.h.example brain/config.h
+          mkdir -p firmware
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir firmware \
+            brain/
+          ls -lh firmware/brain.ino.bin
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lantern-brain-firmware
+          path: firmware/brain.ino.bin
+          if-no-files-found: error
+
+      - name: Publish latest firmware release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: firmware
+          name: Latest Brain firmware
+          body: |
+            Auto-built `brain.ino.bin` from ${{ github.sha }}.
+
+            Install over the LAN (Brain already running this OTA firmware):
+
+            ```bash
+            curl -L -o /tmp/brain.ino.bin \
+              https://github.com/${{ github.repository }}/releases/latest/download/brain.ino.bin
+            curl -f -F "update=@/tmp/brain.ino.bin" http://<brain-ip>/update
+            ```
+
+            Or on the Brain web UI: **Firmware → Install from GitHub**.
+          files: firmware/brain.ino.bin
+          make_latest: true
+          allow_updates: true

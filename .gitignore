@@ -1,1 +1,13 @@
 brain/config.h
+brain/build/
+firmware/
+
+# Tests / OS
+tests/__pycache__/
+tests/.venv/
+.pytest_cache/
+.DS_Store
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
