@@ -715,3 +715,14 @@ class TestOtaEndpoint:
         assert "tag" in data
         assert "url" in data
         assert str(data["url"]).startswith("http")
+        assert "sha" in data
+        assert "sha_short" in data
+        assert "built" in data
+
+    def test_update_check_returns_current_sha(self, brain_url):
+        r = requests.get(f"{brain_url}/update/check", timeout=15)
+        assert r.status_code == 200
+        data = r.json()
+        assert "current" in data
+        assert "update" in data
+        assert "checked" in data

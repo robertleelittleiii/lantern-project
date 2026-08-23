@@ -41,20 +41,47 @@ jobs:
           arduino-cli lib install ArduinoJson
 
       - name: Compile Brain firmware
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
+          python3 - <<'PY'
+          import os
+          sha = os.environ["GITHUB_SHA"]
+          open("brain/version.h", "w").write(
+              "#pragma once\n"
+              "#define FW_GIT_SHA \"%s\"\n"
+              "#define FW_GIT_SHA_SHORT \"%s\"\n" % (sha, sha[:7])
+          )
+          PY
           cp brain/config.h.example brain/config.h
           mkdir -p firmware
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
             --output-dir firmware \
             brain/
-          ls -lh firmware/brain.ino.bin
+          python3 - <<'PY'
+          import json, os, datetime
+          sha = os.environ["GITHUB_SHA"]
+          ver = {
+              "sha": sha,
+              "sha_short": sha[:7],
+              "built": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
+              "run": os.environ.get("GITHUB_RUN_ID", ""),
+          }
+          open("firmware/version.json", "w").write(json.dumps(ver) + "\n")
+          print(ver)
+          PY
+          ls -lh firmware/brain.ino.bin firmware/version.json
+          cat brain/version.h
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: lantern-brain-firmware
-          path: firmware/brain.ino.bin
+          path: |
+            firmware/brain.ino.bin
+            firmware/version.json
           if-no-files-found: error
 
       - name: Publish latest firmware release
@@ -75,6 +102,8 @@ jobs:
             ```
 
             Or on the Brain web UI: **Firmware → Install from GitHub**.
-          files: firmware/brain.ino.bin
+          files: |
+            firmware/brain.ino.bin
+            firmware/version.json
           make_latest: true
           allow_updates: true

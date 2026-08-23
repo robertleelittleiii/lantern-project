@@ -17,6 +17,9 @@
 #ifndef FW_URL_DEFAULT
 #define FW_URL_DEFAULT "https://github.com/robertleelittleiii/lantern-project/releases/latest/download/brain.ino.bin"
 #endif
+#ifndef FW_VERSION_URL
+#define FW_VERSION_URL "https://github.com/robertleelittleiii/lantern-project/releases/latest/download/version.json"
+#endif
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -32,6 +35,7 @@
 #include <math.h>
 #include <ctype.h>
 #include "config.h"
+#include "version.h"
 
 // ── Fixed Settings ───────────────────────────────────────────────────────────
 const int PIR_FRONT  = 27;
@@ -222,7 +226,7 @@ void maintainMemory() {
 void attachHttpLogMiddleware() {
   server.addMiddleware([](WebServer& s, Middleware::Callback next) {
     String uri = s.uri();
-    if (uri == "/status" || uri == "/schedule" || uri == "/log") return next();
+    if (uri == "/status" || uri == "/schedule" || uri == "/log" || uri == "/update/check") return next();
     uint32_t t0 = millis();
     bool ok = next();
     Log.printf("HTTP %s %s -> %d %lums\n",
@@ -1181,8 +1185,10 @@ input[type=color]{width:100%;height:38px;border:none;border-radius:4px;cursor:po
 
 <h2>Firmware</h2>
 <div class="card">
-  <div style="font-size:.75em;color:#666;margin-bottom:8px">GitHub Actions builds <code>brain.ino.bin</code> on every push. Install that build over Wi‑Fi, or upload a local file. Arduino IDE Network Port also works.</div>
-  <button id="btn-gh" onclick="installGithub()" style="background:#ff9f43;color:#1a1a2e;font-weight:bold">Install from GitHub</button>
+  <div style="font-size:.85em;color:#ccc">This Brain: <strong id="fw-cur" style="color:#ff9f43">…</strong></div>
+  <div style="font-size:.85em;color:#ccc;margin-top:4px">GitHub: <strong id="fw-latest" style="color:#888">checking…</strong></div>
+  <div id="fw-avail" style="display:none;font-size:.85em;color:#4ecca3;margin-top:6px">A newer build is available.</div>
+  <button id="btn-gh" onclick="installGithub()" style="background:#ff9f43;color:#1a1a2e;font-weight:bold;margin-top:8px">Install from GitHub</button>
   <input type="file" id="fw-file" accept=".bin">
   <button id="btn-fw" onclick="uploadFw()">Upload .bin &amp; Reboot</button>
   <div style="font-size:.8em;color:#888;text-align:center;min-height:1.2em" id="fw-sts"></div>
@@ -1409,6 +1415,41 @@ function toggleLogAuto(){
     logTimer=setInterval(refreshLog,2000);
   }
 }
+function shortSha(s){s=(s||'').trim();return s.length>7?s.slice(0,7):s;}
+async function checkFw(){
+  const curEl=document.getElementById('fw-cur');
+  const latEl=document.getElementById('fw-latest');
+  const av=document.getElementById('fw-avail');
+  const btn=document.getElementById('btn-gh');
+  try{
+    const u=await fetch('/update');const c=await u.json();
+    const cur=c.sha_short||shortSha(c.sha)||'dev';
+    curEl.textContent=cur+(c.built?' · '+c.built:'');
+  }catch(e){curEl.textContent='unknown';}
+  try{
+    const r=await fetch('/update/check');const d=await r.json();
+    if(!d.checked){
+      latEl.textContent=d.error?('check failed (HTTP '+d.error+')'):'could not reach GitHub';
+      latEl.style.color='#c0392b';
+      return;
+    }
+    const lat=d.latest_short||shortSha(d.latest)||'—';
+    if(d.update){
+      latEl.textContent=lat+(d.latest_built?' · '+d.latest_built:'');
+      latEl.style.color='#ff9f43';
+      av.style.display='block';
+      btn.textContent='Install update from GitHub';
+    }else{
+      latEl.textContent=lat+' · up to date';
+      latEl.style.color='#4ecca3';
+      av.style.display='none';
+      btn.textContent='Reinstall from GitHub';
+    }
+  }catch(e){
+    latEl.textContent='check failed';
+    latEl.style.color='#c0392b';
+  }
+}
 async function installGithub(){
   if(!confirm('Download the latest GitHub firmware and reboot this Brain?'))return;
   const sts=document.getElementById('fw-sts');
@@ -1497,6 +1538,7 @@ async function init(){
   ht.addEventListener('blur',()=>saveTag());
   updateSchedUI();
   updateLabels();
+  checkFw();
   setInterval(pollStatus,1000);
   setInterval(pollSchedule,5000);
   pollSchedule();
@@ -1725,7 +1767,7 @@ init();
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Log.println("Lantern Brain boot — USB serial 115200 + GET /log");
+  Log.printf("Lantern Brain boot — USB serial 115200 + GET /log  sha %s\n", FW_GIT_SHA_SHORT);
 
   pinMode(PIR_FRONT, INPUT_PULLDOWN);
   pinMode(PIR_MIDDLE, INPUT_PULLDOWN);
@@ -1936,13 +1978,66 @@ void setup() {
 
   // ── Firmware OTA (browser upload) ──
   server.on("/update", HTTP_GET, []() {
-    StaticJsonDocument<384> doc;
+    StaticJsonDocument<512> doc;
     doc["ota"] = true;
     doc["hostname"] = mdnsHostname();
     doc["tag"] = deviceTag;
     doc["url"] = FW_URL_DEFAULT;
     doc["built"] = String(__DATE__) + " " + __TIME__;
+    doc["sha"] = FW_GIT_SHA;
+    doc["sha_short"] = FW_GIT_SHA_SHORT;
     String json; serializeJson(doc, json);
+    server.send(200, "application/json", json);
+  });
+  server.on("/update/check", HTTP_GET, []() {
+    StaticJsonDocument<512> out;
+    out["current"] = FW_GIT_SHA;
+    out["current_short"] = FW_GIT_SHA_SHORT;
+    out["built"] = String(__DATE__) + " " + __TIME__;
+    out["url"] = FW_URL_DEFAULT;
+    out["latest"] = "";
+    out["latest_short"] = "";
+    out["update"] = false;
+    out["checked"] = false;
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(8000);
+    http.setUserAgent("LanternBrain");
+    if (http.begin(client, FW_VERSION_URL)) {
+      int code = http.GET();
+      if (code == 200) {
+        String body = http.getString();
+        StaticJsonDocument<384> ver;
+        if (!deserializeJson(ver, body)) {
+          String latest = ver["sha"] | "";
+          String latestShort = ver["sha_short"] | latest.substring(0, 7);
+          out["latest"] = latest;
+          out["latest_short"] = latestShort;
+          out["latest_built"] = ver["built"] | "";
+          out["checked"] = true;
+          String cur = String(FW_GIT_SHA);
+          bool unknown = (cur == "dev" || cur.length() < 7);
+          bool match = false;
+          if (!unknown && latest.length() >= 7) {
+            match = true;
+            for (int i = 0; i < 7; i++) {
+              char a = cur[i], b = latest[i];
+              if (a >= 'A' && a <= 'Z') a += 32;
+              if (b >= 'A' && b <= 'Z') b += 32;
+              if (a != b) { match = false; break; }
+            }
+          }
+          out["update"] = latest.length() > 0 && (unknown || !match);
+        }
+      } else {
+        out["error"] = code;
+      }
+      http.end();
+    }
+    String json; serializeJson(out, json);
     server.send(200, "application/json", json);
   });
   server.on("/update/url", HTTP_POST, []() {
