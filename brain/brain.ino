@@ -204,6 +204,12 @@ void attachLogRoutes() {
   server.on("/log/clear", HTTP_POST, handleLogClear);
 }
 
+bool   otaInProgress = false;
+uint32_t otaBytes = 0, otaTotal = 0;
+const char* otaPhase = "idle";
+char otaUrlBuf[256];
+char otaErrBuf[96];
+
 // ESP32 has no GC. Bound buffers + this watchdog keep long uptimes from dying on heap.
 #define HEAP_RESTART_MIN 16384
 void maintainMemory() {
@@ -216,17 +222,49 @@ void maintainMemory() {
                (unsigned long)ESP.getMinFreeHeap(),
                (unsigned long)ESP.getMaxAllocHeap());
   }
-  if (heap < HEAP_RESTART_MIN) {
+  if (!otaInProgress && heap < HEAP_RESTART_MIN) {
     Log.printf("heap low (%lu) — restarting\n", (unsigned long)heap);
     delay(300);
     ESP.restart();
   }
 }
 
+void firmwareOtaTask(void*) {
+  WiFi.setSleep(false);
+  Log.println("URL OTA start");
+  otaPhase = "download";
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPUpdate updater(180000);
+  updater.rebootOnUpdate(false);
+  updater.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  updater.onProgress([](int cur, int tot) {
+    otaBytes = (uint32_t)cur;
+    otaTotal = (uint32_t)tot;
+    otaPhase = "flash";
+  });
+  t_httpUpdate_return ret = updater.update(client, String(otaUrlBuf));
+  if (ret == HTTP_UPDATE_OK) {
+    otaPhase = "reboot";
+    if (otaTotal) otaBytes = otaTotal;
+    Log.println("URL OTA OK — rebooting");
+    delay(800);
+    ESP.restart();
+  } else {
+    strncpy(otaErrBuf, updater.getLastErrorString().c_str(), sizeof(otaErrBuf) - 1);
+    otaErrBuf[sizeof(otaErrBuf) - 1] = 0;
+    otaPhase = "error";
+    otaInProgress = false;
+    Log.printf("URL OTA failed: %s\n", otaErrBuf);
+  }
+  vTaskDelete(NULL);
+}
+
 void attachHttpLogMiddleware() {
   server.addMiddleware([](WebServer& s, Middleware::Callback next) {
     String uri = s.uri();
-    if (uri == "/status" || uri == "/schedule" || uri == "/log" || uri == "/update/check") return next();
+    if (uri == "/status" || uri == "/schedule" || uri == "/log" ||
+        uri == "/update/check" || uri == "/update/progress") return next();
     uint32_t t0 = millis();
     bool ok = next();
     Log.printf("HTTP %s %s -> %d %lums\n",
@@ -244,7 +282,6 @@ String wifiPass;
 String wledIP;
 String wledName;
 String deviceTag;       // display name, e.g. "Walkway"
-bool   otaInProgress = false;
 
 #define MAX_WLED_HOSTS 12
 struct WledHost {
@@ -1191,6 +1228,9 @@ input[type=color]{width:100%;height:38px;border:none;border-radius:4px;cursor:po
   <button id="btn-gh" onclick="installGithub()" style="background:#ff9f43;color:#1a1a2e;font-weight:bold;margin-top:8px">Install from GitHub</button>
   <input type="file" id="fw-file" accept=".bin">
   <button id="btn-fw" onclick="uploadFw()">Upload .bin &amp; Reboot</button>
+  <div id="fw-bar-wrap" style="display:none;margin-top:10px;background:#0d1b2e;border-radius:4px;overflow:hidden;height:14px">
+    <div id="fw-bar" style="height:14px;width:0;background:#ff9f43;transition:width .3s"></div>
+  </div>
   <div style="font-size:.8em;color:#888;text-align:center;min-height:1.2em" id="fw-sts"></div>
 </div>
 
@@ -1450,16 +1490,70 @@ async function checkFw(){
     latEl.style.color='#c0392b';
   }
 }
+function showFwBar(pct,msg){
+  const wrap=document.getElementById('fw-bar-wrap');
+  wrap.style.display='block';
+  const p=Math.max(0,Math.min(100,+pct||0));
+  document.getElementById('fw-bar').style.width=p+'%';
+  if(msg) document.getElementById('fw-sts').textContent=msg;
+}
+function waitForBrain(){
+  const sts=document.getElementById('fw-sts');
+  showFwBar(100,'Rebooting\u2026 waiting for the Brain to come back');
+  let down=false;
+  let n=0;
+  const t=setInterval(async()=>{
+    n++;
+    try{
+      const r=await fetch('/update?t='+Date.now(),{cache:'no-store',signal:AbortSignal.timeout?AbortSignal.timeout(2500):undefined});
+      if(r.ok && (down || n>=4)){
+        clearInterval(t);
+        sts.textContent='Back online \u2014 reloading';
+        location.reload();
+      }
+    }catch(e){
+      down=true;
+      showFwBar(100,'Waiting for Brain\u2026 '+(n*2)+'s');
+    }
+    if(n>90){
+      clearInterval(t);
+      sts.textContent='Still down after 3 min \u2014 reload this page when it returns.';
+    }
+  },2000);
+}
+async function pollOtaProgress(){
+  for(let i=0;i<360;i++){
+    await new Promise(r=>setTimeout(r,500));
+    try{
+      const r=await fetch('/update/progress',{cache:'no-store',signal:AbortSignal.timeout?AbortSignal.timeout(2000):undefined});
+      const d=await r.json();
+      const tot=+d.total||0, n=+d.bytes||0;
+      const pct=tot>0?Math.round(n*100/tot):(d.running?2:0);
+      const kb=tot?(' '+Math.round(n/1024)+'/'+Math.round(tot/1024)+' KB'):'';
+      showFwBar(pct,(d.phase||'updating')+' \u2014 '+pct+'%'+kb);
+      if(d.error){document.getElementById('fw-sts').textContent='Update failed: '+d.error;return;}
+      if(d.phase==='reboot' || (tot>0 && n>=tot && !d.running)) break;
+    }catch(e){
+      waitForBrain();
+      return;
+    }
+  }
+  waitForBrain();
+}
 async function installGithub(){
   if(!confirm('Download the latest GitHub firmware and reboot this Brain?'))return;
   const sts=document.getElementById('fw-sts');
   const btn=document.getElementById('btn-gh');
-  btn.disabled=true;sts.textContent='Fetching from GitHub\u2026';
+  btn.disabled=true;document.getElementById('btn-fw').disabled=true;
+  showFwBar(1,'Starting GitHub download\u2026');
   try{
     const r=await fetch('/update/url',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     const d=await r.json();
-    sts.textContent=d.started?'Downloading and flashing\u2026 the page will drop when it reboots.':'GitHub update failed to start';
-  }catch(e){sts.textContent='Request failed \u2014 device may already be rebooting';}
+    if(!d.started){sts.textContent='GitHub update failed to start';return;}
+    await pollOtaProgress();
+  }catch(e){
+    waitForBrain();
+  }
 }
 function uploadFw(){
   const f=document.getElementById('fw-file').files[0];
@@ -1471,19 +1565,24 @@ function uploadFw(){
   xhr.open('POST','/update');
   xhr.timeout=180000;
   xhr.upload.onprogress=function(e){
-    if(e.lengthComputable) sts.textContent=Math.round(e.loaded*100/e.total)+'%';
+    if(e.lengthComputable){
+      const pct=Math.round(e.loaded*100/e.total);
+      showFwBar(pct,'Uploading \u2014 '+pct+'% ('+Math.round(e.loaded/1024)+'/'+Math.round(e.total/1024)+' KB)');
+    }
   };
   xhr.onload=function(){
     if(xhr.status>=200&&xhr.status<300){
-      sts.textContent='Uploaded \u2014 rebooting\u2026 reconnect to lanternbrain.local';
+      showFwBar(100,'Uploaded \u2014 rebooting');
+      waitForBrain();
     }else{
       sts.textContent='Upload failed (HTTP '+xhr.status+')';
     }
   };
-  xhr.onerror=function(){sts.textContent='Upload failed \u2014 connection lost (device may be rebooting)';};
+  xhr.onerror=function(){waitForBrain();};
   xhr.ontimeout=function(){sts.textContent='Upload timed out';};
   document.getElementById('btn-fw').disabled=true;
-  sts.textContent='Uploading\u2026';
+  document.getElementById('btn-gh').disabled=true;
+  showFwBar(0,'Uploading\u2026');
   xhr.send(fd);
 }
 async function init(){
@@ -1979,6 +2078,19 @@ void setup() {
   });
 
   // ── Firmware OTA (browser upload) ──
+  server.on("/update/progress", HTTP_GET, []() {
+    uint32_t tot = otaTotal, n = otaBytes;
+    int pct = (tot > 0) ? (int)((n * 100ULL) / tot) : 0;
+    StaticJsonDocument<256> doc;
+    doc["running"] = otaInProgress;
+    doc["phase"] = otaPhase;
+    doc["bytes"] = n;
+    doc["total"] = tot;
+    doc["pct"] = pct;
+    doc["error"] = otaErrBuf;
+    String json; serializeJson(doc, json);
+    server.send(200, "application/json", json);
+  });
   server.on("/update", HTTP_GET, []() {
     StaticJsonDocument<512> doc;
     doc["ota"] = true;
@@ -2043,6 +2155,10 @@ void setup() {
     server.send(200, "application/json", json);
   });
   server.on("/update/url", HTTP_POST, []() {
+    if (otaInProgress) {
+      server.send(409, "application/json", "{\"success\":false,\"error\":\"ota running\"}");
+      return;
+    }
     StaticJsonDocument<512> doc;
     String url = FW_URL_DEFAULT;
     if (!deserializeJson(doc, server.arg("plain"))) {
@@ -2050,31 +2166,20 @@ void setup() {
       u.trim();
       if (u.startsWith("http://") || u.startsWith("https://")) url = u;
     }
-    Log.printf("OTA from URL: %s\n", url.c_str());
-    server.send(200, "application/json", "{\"success\":true,\"started\":true}");
-    delay(200);
-
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPUpdate updater(180000);
-    updater.rebootOnUpdate(true);
-    updater.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    updater.onStart([]() {
-      otaInProgress = true;
-      WiFi.setSleep(false);
-      Log.println("URL OTA start");
-    });
-    updater.onError([](int e) {
-      otaInProgress = false;
-      Log.printf("URL OTA error %d\n", e);
-    });
-    t_httpUpdate_return ret = updater.update(client, url);
-    if (ret == HTTP_UPDATE_OK) {
-      Log.println("URL OTA OK — rebooting");
-    } else {
-      otaInProgress = false;
-      Log.printf("URL OTA failed: %s\n", updater.getLastErrorString().c_str());
+    if (url.length() >= (int)sizeof(otaUrlBuf)) {
+      server.send(400, "application/json", "{\"success\":false,\"error\":\"url too long\"}");
+      return;
     }
+    strncpy(otaUrlBuf, url.c_str(), sizeof(otaUrlBuf) - 1);
+    otaUrlBuf[sizeof(otaUrlBuf) - 1] = 0;
+    otaBytes = 0;
+    otaTotal = 0;
+    otaErrBuf[0] = 0;
+    otaPhase = "download";
+    otaInProgress = true;
+    Log.printf("OTA from URL: %s\n", otaUrlBuf);
+    server.send(200, "application/json", "{\"success\":true,\"started\":true}");
+    xTaskCreate(firmwareOtaTask, "fwota", 16384, NULL, 1, NULL);
   });
   server.on("/update", HTTP_POST, []() {
     if (Update.hasError()) {
@@ -2089,10 +2194,17 @@ void setup() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
       otaInProgress = true;
+      otaPhase = "upload";
+      otaBytes = 0;
+      otaTotal = upload.totalSize;
+      otaErrBuf[0] = 0;
       WiFi.setSleep(false);
       Log.printf("HTTP update: %s\n", upload.filename.c_str());
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Log);
     } else if (upload.status == UPLOAD_FILE_WRITE) {
+      otaBytes += upload.currentSize;
+      otaTotal = upload.totalSize;
+      otaPhase = "flash";
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize)
         Update.printError(Log);
     } else if (upload.status == UPLOAD_FILE_END) {

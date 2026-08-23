@@ -719,6 +719,14 @@ class TestOtaEndpoint:
         assert "sha_short" in data
         assert "built" in data
 
+    def test_update_progress_idle(self, brain_url):
+        r = requests.get(f"{brain_url}/update/progress", timeout=TIMEOUT)
+        assert r.status_code == 200
+        data = r.json()
+        assert "running" in data
+        assert "pct" in data
+        assert data["running"] is False
+
     def test_update_check_returns_current_sha(self, brain_url):
         r = requests.get(f"{brain_url}/update/check", timeout=15)
         assert r.status_code == 200
