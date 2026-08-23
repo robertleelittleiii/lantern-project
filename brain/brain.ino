@@ -1790,6 +1790,8 @@ void setup() {
   }
   if (WiFi.status() != WL_CONNECTED) startAPMode();  // never returns
   Log.println("\nConnected: " + WiFi.localIP().toString());
+  // Persist working creds so a GitHub .bin (built from config.h.example) still joins.
+  saveWifiCreds(wifiSSID, wifiPass);
   {
     String host = mdnsHostname();
     if (MDNS.begin(host.c_str())) Log.println("mDNS: " + host + ".local");
@@ -2348,6 +2350,8 @@ void setup() {
   if (numSegments == 0) {
     Log.println("WARNING: No segments detected — check WLED");
     numSegments = 1;
+  } else if (wledIP.indexOf("XXX") < 0) {
+    saveWledTarget();
   }
   // Apply default middle segment if not stored or out of range
   if (sensorMidSeg <= 0 || sensorMidSeg >= numSegments)
