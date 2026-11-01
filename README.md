@@ -37,6 +37,16 @@ curl -f -F "update=@/tmp/brain.ino.bin" http://<brain-ip>/update
 
 USB / Arduino IDE Network Port (`lanternbrain` or `lanternbrain-<name>`) still work.
 
+
+### Build, flash, and publish (with binary)
+1. `arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir brain/build brain/`
+2. Flash: OTA `curl -f -F "update=@brain/build/brain.ino.bin" http://<brain-ip>/update` (or USB `arduino-cli upload ...`).
+3. Run tests: `BRAIN_IP=<ip> [WLED_IP=<ip>] tests/.venv/bin/pytest tests/test_api.py -v`.
+4. Publish the binary in the repo so Brains can pull it: copy `brain/build/brain.ino.bin` to
+   `firmware/brain.ino.bin`, write `firmware/VERSION.txt` (commit SHA + date), commit, and push the branch.
+   A branch binary is reachable at `https://raw.githubusercontent.com/robertleelittleiii/lantern-project/<branch>/firmware/brain.ino.bin`
+   (use it with `POST /update/url`). "Install from GitHub" uses releases/latest, which is built only by pushes to master.
+
 ## Setup (first flash)
 
 1. Copy `brain/config.h.example` to `brain/config.h` and fill in Wi‑Fi (WLED IP is a fallback; the UI can discover hosts).
@@ -47,6 +57,11 @@ USB / Arduino IDE Network Port (`lanternbrain` or `lanternbrain-<name>`) still w
    ```
 3. Open `http://lanternbrain.local/` (or the device IP). Set a **Name** if you
    run more than one Brain (`lanternbrain-walkway.local`, …).
+
+## WLED presets
+Ambient and Motion can each use a WLED preset (by numeric ID; the UI shows "2 · Halloween"). With a preset the Brain
+loads it with one `{"ps":id}` call and then changes **brightness only**, so per-lantern colors survive. See PRESET_SUPPORT.md.
+Endpoints: `GET /presets` (id+name), `GET /presets/sync` (per-lantern colors), `/preview?mode=ambient|motion|off`.
 
 ## Project structure
 

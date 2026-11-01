@@ -42,7 +42,7 @@ const int PIR_FRONT  = 27;
 const int PIR_MIDDLE = 25;
 const int PIR_BACK   = 26;
 #define MAX_SEG 16
-#define SETTINGS_VER 3   // increment when default values change
+#define SETTINGS_VER 4   // increment when default values change (v4: psAmbient/psMotion)
 int       numSegments = 0;  // auto-detected from WLED at startup
 
 // ── Tunable Settings (changeable via web UI) ─────────────────────────────────
@@ -58,6 +58,8 @@ bool          colBrightEnable = false; // Send color override on motion activati
 unsigned long motionTimeout = 10000; // ms
 int           waveDelay    = 500;    // ms between segment changes
 int           sensorMidSeg = 0;      // middle sensor segment (0 = auto: numSegments/2)
+int           psAmbient    = 0;      // WLED preset for ambient (0 = legacy fx/pal painting)
+int           psMotion     = 0;      // WLED preset for motion (0 = same look as ambient, brightness only)
 
 // ── Schedule Settings ─────────────────────────────────────────────────────
 int           scheduleMode  = 0;     // 0=always on, 1=sunset-to-sunrise, 2=custom hours
@@ -352,13 +354,134 @@ void setSegment(int segId, int bri, int fx, int pal = -1,
   delay(10);
 }
 
+String psAmbientName = "", psMotionName = "";  // display names (IDs are what's stored)
+String presetLabel(int id, const String& name);
+// ── WLED preset helpers ─────────────────────────────────────────────────────
+// POST a raw JSON body to WLED /json/state. Response is consumed before end().
+bool wledPostState(const char* body, size_t n) {
+  ensureWiFi();
+  if (WiFi.status() != WL_CONNECTED) return false;
+  HTTPClient http;
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s/json/state", wledIP.c_str());
+  http.begin(url);
+  http.setTimeout(5000);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST((uint8_t*)body, n);
+  if (code > 0) http.getString();  // drain
+  else Log.printf("WLED POST failed: %s\n", http.errorToString(code).c_str());
+  http.end();
+  delay(10);
+  return code == 200;
+}
+
+// Load a WLED preset with ONE call. WLED applies presets in its own loop, so give it a moment.
+void applyPreset(int id) {
+  if (id <= 0) return;
+  char body[32];
+  size_t n = snprintf(body, sizeof(body), "{\"ps\":%d}", id);
+  bool ok = wledPostState(body, n);
+  const String& nm = (id == psAmbient) ? psAmbientName : (id == psMotion ? psMotionName : String(""));
+  Log.printf("Preset %s loaded (%s)\n", presetLabel(id, nm).c_str(), ok ? "ok" : "fail");
+  delay(150);
+}
+
+// Brightness-only write (optionally with a color override); keeps the preset's fx/pal/col.
+void setSegBri(int seg, int bri, int r = -1, int g = -1, int b = -1) {
+  char body[96];
+  size_t n;
+  if (r >= 0) n = snprintf(body, sizeof(body), "{\"seg\":[{\"id\":%d,\"bri\":%d,\"col\":[[%d,%d,%d]]}]}", seg, bri, r, g, b);
+  else        n = snprintf(body, sizeof(body), "{\"seg\":[{\"id\":%d,\"bri\":%d}]}", seg, bri);
+  wledPostState(body, n);
+  Log.printf("Seg %d → bri %d (preset mode)\n", seg, bri);
+}
+
+// One call that sets the brightness of every segment.
+void setAllSegBri(int bri) {
+  char body[16 + MAX_SEG * 24];
+  size_t n = snprintf(body, sizeof(body), "{\"seg\":[");
+  for (int i = 0; i < numSegments && i < MAX_SEG; i++)
+    n += snprintf(body + n, sizeof(body) - n, "%s{\"id\":%d,\"bri\":%d}", i ? "," : "", i, bri);
+  n += snprintf(body + n, sizeof(body) - n, "]}");
+  wledPostState(body, n);
+}
+
+
+String presetLabel(int id, const String& name) {
+  if (id <= 0) return String("none");
+  if (name.length() == 0) return String("Preset ") + id + " (missing)";
+  return String(id) + " \u00B7 " + name;
+}
+
+// Fetch WLED /presets.json (streamed through a name-only filter) into out["presets"]=[{id,name}].
+// Also refreshes the display names of psAmbient/psMotion. Returns HTTP-ish status.
+int fetchPresetList(JsonDocument& out) {
+  ensureWiFi();
+  if (WiFi.status() != WL_CONNECTED) return 502;
+  HTTPClient http;
+  char url[64];
+  snprintf(url, sizeof(url), "http://%s/presets.json", wledIP.c_str());
+  http.begin(url);
+  http.setTimeout(5000);
+  int code = http.GET();
+  if (code != 200) {
+    if (code > 0) http.getString();
+    http.end();
+    return 502;
+  }
+  StaticJsonDocument<64> filter;
+  filter["*"]["n"] = true;               // keep only names; presets.json can be large
+  DynamicJsonDocument doc(3072);
+  DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (err) { Log.printf("presets.json parse: %s\n", err.c_str()); return 500; }
+  JsonArray arr = out.createNestedArray("presets");
+  String na = "", nm2 = "";
+  for (JsonPair kv : doc.as<JsonObject>()) {
+    int id = atoi(kv.key().c_str());
+    if (id <= 0) continue;               // "0" is WLED's placeholder
+    String nm = kv.value()["n"] | "";
+    nm.trim();
+    if (nm.length() == 0) nm = String("Preset ") + id;
+    JsonObject o = arr.createNestedObject();
+    o["id"] = id;
+    o["name"] = nm;
+    if (id == psAmbient) na = nm;
+    if (id == psMotion)  nm2 = nm;
+  }
+  psAmbientName = na; psMotionName = nm2;
+  return 200;
+}
+
+void refreshPresetNames() {
+  if (psAmbient <= 0 && psMotion <= 0) return;
+  DynamicJsonDocument tmp(3072);
+  fetchPresetList(tmp);
+  Log.printf("Presets: ambient=%s motion=%s\n", presetLabel(psAmbient, psAmbientName).c_str(),
+             presetLabel(psMotion, psMotionName).c_str());
+}
+
+bool motionPresetMode() { return psAmbient > 0 || psMotion > 0; }
+bool motionSwapsPreset() { return psMotion > 0 && psMotion != psAmbient; }
+
+// Called once when a fresh motion episode starts: snap to the motion preset if it differs.
+void startMotionLook() {
+  if (!motionSwapsPreset()) return;
+  applyPreset(psMotion);
+  setAllSegBri(briAmbient);  // wave then reveals lanterns one by one
+}
+
 // ── Directional wave helpers ─────────────────────────────────────────────────
 
 // Light a single segment and record the order
 void lightSeg(int seg) {
   if (seg < 0 || seg >= numSegments || segBright[seg]) return;
   if (litCount >= MAX_SEG) return;  // bounds guard — prevents litOrder[] overflow
-  if (colBrightEnable)
+  if (motionPresetMode()) {
+    // Preset mode: brightness only, preset colors/effect survive (override only if explicitly on)
+    if (colBrightEnable) setSegBri(seg, briBright, colBrightR, colBrightG, colBrightB);
+    else                 setSegBri(seg, briBright);
+  } else if (colBrightEnable)
     setSegment(seg, briBright, fxBright, -1, colBrightR, colBrightG, colBrightB);
   else
     // No override: send neutral warm white so any stale override color in WLED
@@ -371,7 +494,8 @@ void lightSeg(int seg) {
 // Dim a single segment
 void dimSeg(int seg) {
   if (seg < 0 || seg >= numSegments || !segBright[seg]) return;
-  setSegment(seg, briAmbient, fxAmbient, palAmbient);
+  if (motionPresetMode()) setSegBri(seg, briAmbient);
+  else setSegment(seg, briAmbient, fxAmbient, palAmbient);
   segBright[seg] = false;
 }
 
@@ -462,6 +586,14 @@ void tickDim() {
       break;
 
     case WAVE_APPLY_AMBIENT:
+      if (psAmbient > 0) {
+        // Preset mode: return to the ambient preset/level in one go
+        if (motionSwapsPreset()) applyPreset(psAmbient);
+        setAllSegBri(briAmbient);
+        for (int i = 0; i < numSegments; i++) segBright[i] = false;
+        litCount = 0; waveState = WAVE_IDLE; dimDone = true;
+        break;
+      }
       setSegment(waveCurr, briAmbient, fxAmbient, palAmbient);
       segBright[waveCurr] = false;
       waveCurr++;
@@ -481,6 +613,13 @@ void tickDim() {
 
 void applyAmbient() {
   clearWavePool();
+  if (psAmbient > 0) {
+    applyPreset(psAmbient);
+    setAllSegBri(briAmbient);  // preset brightness is explicit: always apply briAmbient
+    for (int i = 0; i < numSegments; i++) segBright[i] = false;
+    litCount = 0;
+    return;
+  }
   for (int i = 0; i < numSegments; i++) {
     setSegment(i, briAmbient, fxAmbient, palAmbient);
     segBright[i] = false;
@@ -643,6 +782,8 @@ void loadSettings() {
   motionTimeout   = prefs.getULong("mTimeout",   10000);
   waveDelay       = prefs.getInt("waveDelay",    500);
   sensorMidSeg    = prefs.getInt("midSeg",       0);
+  psAmbient       = prefs.getInt("psAmbient",    0);
+  psMotion        = prefs.getInt("psMotion",     0);
   scheduleMode    = prefs.getInt("schedMode",    0);
   schedLat        = prefs.getFloat("schedLat",   0.0f);
   schedLon        = prefs.getFloat("schedLon",   0.0f);
@@ -654,13 +795,14 @@ void loadSettings() {
   prefs.end();
 
   // Version migrations — run once, then save to advance stored version
-  if (storedVer < 3) {
+  if (storedVer < SETTINGS_VER) {
     if (storedVer < 2) {
       colBrightEnable = false;  // v2: default changed from true → false
       Log.println("NVS migration v2: colBrightEnable reset to false");
     }
     // v3: schedule fields — already defaulted by getX() calls above
-    Log.println("NVS migration v3: schedule fields initialised");
+    if (storedVer < 3) Log.println("NVS migration v3: schedule fields initialised");
+    if (storedVer < 4) Log.println("NVS migration v4: psAmbient/psMotion = 0 (legacy)");
     saveSettings();  // advance stored version so this block runs only once
   }
   Log.println("Settings loaded from NVS");
@@ -988,6 +1130,8 @@ void saveSettings() {
   prefs.putULong("mTimeout",   motionTimeout);
   prefs.putInt("waveDelay",    waveDelay);
   prefs.putInt("midSeg",       sensorMidSeg);
+  prefs.putInt("psAmbient",    psAmbient);
+  prefs.putInt("psMotion",     psMotion);
   prefs.putInt("schedMode",    scheduleMode);
   prefs.putFloat("schedLat",   schedLat);
   prefs.putFloat("schedLon",   schedLon);
@@ -1043,7 +1187,8 @@ select,input[type=range]{width:100%;margin:2px 0}
 .val{float:right;color:#ff9f43}
 button{width:100%;padding:12px;margin:8px 0;border:none;border-radius:6px;font-size:1em;cursor:pointer}
 #apply{background:#ff9f43;color:#1a1a2e;font-weight:bold}
-#preview-a{background:#2d4059;color:#eee}#preview-m{background:#2d4059;color:#eee}
+#preview-a{background:#555;color:#eee}#preview-m{background:#555;color:#eee}
+select:disabled{opacity:.4}
 #rescan,#btn-wled-scan,#btn-wled-lan{background:#2d4059;color:#eee;margin-top:4px}
 #btn-wled-scan,#btn-wled-lan{width:auto;padding:8px 12px;font-size:.9em;margin:0;white-space:nowrap}
 #btn-fw{background:#ff9f43;color:#1a1a2e;font-weight:bold}
@@ -1081,6 +1226,8 @@ input[type=color]{width:100%;height:38px;border:none;border-radius:4px;cursor:po
 
 <h2>Ambient Mode</h2>
 <div class="card">
+  <label>Preset</label>
+  <select id="a-ps" onchange="psChanged()"><option value="0">None (use effect/palette below)</option></select>
   <label>Effect <span class="val" id="va-fx"></span></label>
   <select id="a-fx"></select>
   <label>Brightness <span class="val" id="va-bri"></span></label>
@@ -1092,6 +1239,8 @@ input[type=color]{width:100%;height:38px;border:none;border-radius:4px;cursor:po
 
 <h2>Motion Mode</h2>
 <div class="card">
+  <label>Preset</label>
+  <select id="m-ps" onchange="psChanged()"><option value="0">Same as ambient (brightness only)</option></select>
   <label>Effect <span class="val" id="vm-fx"></span></label>
   <select id="m-fx"></select>
   <label>Brightness <span class="val" id="vm-bri"></span></label>
@@ -1100,6 +1249,7 @@ input[type=color]{width:100%;height:38px;border:none;border-radius:4px;cursor:po
   <input type="color" id="m-col" value="#ff9600">
 </div>
 <button id="preview-m" onclick="preview('m')">Preview Motion</button>
+<button id="btn-sync" onclick="syncPreset()" style="background:#2d4059;color:#eee">&#8645; Sync colors from WLED preset</button>
 
 <h2>Timing</h2>
 <div class="card">
@@ -1614,6 +1764,7 @@ async function init(){
   await loadEffects();
   const r2=await fetch('/config');
   const c=await r2.json();
+  await loadPresets(c.psAmbient||0,c.psMotion||0);
   document.getElementById('a-fx').value=c.fxAmbient;
   document.getElementById('a-bri').value=c.briAmbient;
   document.getElementById('a-pal').value=c.palAmbient||35;
@@ -1795,6 +1946,7 @@ async function changeNetwork(){
   catch(e){}
 }
 async function rescan(){
+  await previewOff(true);
   const btn=document.getElementById('rescan');
   btn.disabled=true;btn.textContent='Scanning...';
   try{
@@ -1812,6 +1964,8 @@ async function apply(){
     briBright:+document.getElementById('m-bri').value,
     briAmbient:+document.getElementById('a-bri').value,
     fxBright:+document.getElementById('m-fx').value,
+    psAmbient:+document.getElementById('a-ps').value,
+    psMotion:+document.getElementById('m-ps').value,
     fxAmbient:+document.getElementById('a-fx').value,
     palAmbient:+document.getElementById('a-pal').value,
     colBrightR:parseInt(mc.slice(1,3),16),
@@ -1846,11 +2000,56 @@ async function apply(){
     await rescan();
   }
 }
+let pvOn='';let syncCols=[];
+async function loadPresets(pa,pm){
+  try{
+    const r=await fetch('/presets');const d=await r.json();
+    ['a-ps','m-ps'].forEach(id=>{
+      const sel=document.getElementById(id);
+      while(sel.options.length>1)sel.remove(1);
+      (d.presets||[]).forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.id+' \u00B7 '+String(p.name).trim();sel.appendChild(o);});
+    });
+  }catch(e){}
+  setPs('a-ps',pa);setPs('m-ps',pm);psChanged();
+}
+function setPs(id,v){const s=document.getElementById(id);if(![...s.options].some(o=>+o.value===+v)){const o=document.createElement('option');o.value=v;o.textContent='Preset '+v+' (missing)';s.appendChild(o);}s.value=v;}
+function psChanged(){
+  const pa=+document.getElementById('a-ps').value,pm=+document.getElementById('m-ps').value;
+  document.getElementById('a-fx').disabled=pa>0;document.getElementById('a-pal').disabled=pa>0;
+  document.getElementById('m-fx').disabled=(pa>0||pm>0);
+}
+function pvColor(){
+  if(syncCols.length){const c=syncCols.map(x=>'rgb('+x.join(',')+')');return c.length>1?'linear-gradient(90deg,'+c.join(',')+')':c[0];}
+  return '#ff9f43';
+}
+function paintPv(){
+  ['a','m'].forEach(k=>{const b=document.getElementById('preview-'+k);
+    b.style.background=(pvOn===k)?pvColor():'#555';b.style.color=(pvOn===k)?'#1a1a2e':'#eee';
+    b.textContent=(pvOn===k?'\u25CF ':'')+'Preview '+(k==='a'?'Ambient':'Motion')+(pvOn===k?' (on)':'');});
+}
+// Refresh calls this: previews off and return to the ambient preset (rescan re-applies ambient).
+async function previewOff(viaRescan){
+  const was=pvOn;pvOn='';paintPv();
+  if(was&&!viaRescan)await fetch('/preview?mode=off');
+}
 async function preview(mode){
+  if(pvOn===mode){await previewOff();return;}
   const bri=+document.getElementById(mode+'-bri').value;
   const fxv=+document.getElementById(mode+'-fx').value;
-  const pal=mode==='a'?+document.getElementById('a-pal').value:-1;
-  await fetch('/preview?bri='+bri+'&fx='+fxv+(pal>=0?'&pal='+pal:''));
+  const ps=+document.getElementById(mode+'-ps').value;
+  let q='/preview?mode='+(mode==='a'?'ambient':'motion')+'&bri='+bri+'&fx='+fxv+'&ps='+ps;
+  if(mode==='a')q+='&pal='+document.getElementById('a-pal').value;
+  await fetch(q);
+  pvOn=mode;paintPv();
+}
+async function syncPreset(){
+  const b=document.getElementById('btn-sync');b.disabled=true;
+  try{const r=await fetch('/presets/sync');const d=await r.json();
+    if(d.success){syncCols=d.colors||[];b.textContent='\u2713 Synced '+syncCols.length+' lantern colors';}
+    else b.textContent='Sync failed';
+  }catch(e){b.textContent='Sync failed';}
+  b.disabled=false;paintPv();
+  setTimeout(()=>b.innerHTML='&#8645; Sync colors from WLED preset',3000);
 }
 function renderSegs(segs){
   const row=document.getElementById('seg-row');
@@ -2305,9 +2504,9 @@ void setup() {
 
   // ── Config GET ──
   server.on("/config", HTTP_GET, []() {
-    char buf[700];
+    char buf[960];
     snprintf(buf, sizeof(buf),
-      "{\"briBright\":%d,\"briAmbient\":%d,\"fxBright\":%d,\"fxAmbient\":%d,"
+      "{\"psAmbient\":%d,\"psMotion\":%d,\"psAmbientName\":\"%s\",\"psMotionName\":\"%s\",\"briBright\":%d,\"briAmbient\":%d,\"fxBright\":%d,\"fxAmbient\":%d,"
       "\"palAmbient\":%d,"
       "\"colBrightR\":%d,\"colBrightG\":%d,\"colBrightB\":%d,"
       "\"colBrightEnable\":%s,"
@@ -2316,6 +2515,8 @@ void setup() {
       "\"tzOffsetMin\":%d,"
       "\"schedOnHour\":%d,\"schedOnMin\":%d,"
       "\"schedOffHour\":%d,\"schedOffMin\":%d}",
+      psAmbient, psMotion,
+      presetLabel(psAmbient, psAmbientName).c_str(), presetLabel(psMotion, psMotionName).c_str(),
       briBright, briAmbient, fxBright, fxAmbient, palAmbient,
       colBrightR, colBrightG, colBrightB,
       colBrightEnable ? "true" : "false",
@@ -2337,6 +2538,8 @@ void setup() {
     }
     bool prevColBrightEnable = colBrightEnable;
     int  prevTzOffsetMin     = tzOffsetMin;
+    if (doc.containsKey("psAmbient"))    psAmbient     = max(0, (int)doc["psAmbient"]);
+    if (doc.containsKey("psMotion"))     psMotion      = max(0, (int)doc["psMotion"]);
     if (doc.containsKey("briBright"))    briBright     = doc["briBright"];
     if (doc.containsKey("briAmbient"))   briAmbient    = doc["briAmbient"];
     if (doc.containsKey("fxBright"))     fxBright      = doc["fxBright"];
@@ -2359,6 +2562,7 @@ void setup() {
     if (doc.containsKey("schedOffMin"))  schedOffMin   = doc["schedOffMin"];
 
     saveSettings();  // persist all settings to NVS flash
+    if (doc.containsKey("psAmbient") || doc.containsKey("psMotion")) refreshPresetNames();
     if (tzOffsetMin != prevTzOffsetMin) syncNTP();  // re-sync if timezone changed
 
     // Interrupt any active wave, then apply ambient (or off if schedule inactive)
@@ -2380,14 +2584,77 @@ void setup() {
   });
 
   // ── Preview endpoint ──
+  // mode=ambient|motion|off uses the same code path as the real modes. Optional bri/fx/pal/ps
+  // args preview unsaved on-screen values (restored afterwards). No mode = legacy raw paint.
   server.on("/preview", []() {
-    int bri = server.arg("bri").toInt();
-    int fx  = server.arg("fx").toInt();
-    int pal = server.hasArg("pal") ? server.arg("pal").toInt() : -1;
-    for (int i = 0; i < numSegments; i++) {
-      setSegment(i, bri, fx, pal);
+    String mode = server.arg("mode");
+    if (mode.length() == 0) {
+      int bri = server.arg("bri").toInt();
+      int fx  = server.arg("fx").toInt();
+      int pal = server.hasArg("pal") ? server.arg("pal").toInt() : -1;
+      for (int i = 0; i < numSegments; i++) setSegment(i, bri, fx, pal);
+      server.send(200, "application/json", "{\"success\":true}");
+      return;
     }
+    int sv[6] = {briAmbient, fxAmbient, palAmbient, psAmbient, briBright, psMotion};
+    int svFxB = fxBright;
+    bool amb = (mode == "ambient" || mode == "a");
+    bool mot = (mode == "motion" || mode == "bright" || mode == "m");
+    if (amb) {
+      if (server.hasArg("bri")) briAmbient = server.arg("bri").toInt();
+      if (server.hasArg("fx"))  fxAmbient  = server.arg("fx").toInt();
+      if (server.hasArg("pal")) palAmbient = server.arg("pal").toInt();
+      if (server.hasArg("ps"))  psAmbient  = server.arg("ps").toInt();
+    } else if (mot) {
+      if (server.hasArg("bri")) briBright = server.arg("bri").toInt();
+      if (server.hasArg("fx"))  fxBright  = server.arg("fx").toInt();
+      if (server.hasArg("ps"))  psMotion  = server.arg("ps").toInt();
+    }
+    waveState = WAVE_IDLE; dimDone = false; clearWavePool();
+    motionActive = false; lastSensor = S_NONE;
+    if (mot) {
+      applyAmbient();          // start from the real ambient state
+      startMotionLook();       // snap to motion preset if different
+      for (int i = 0; i < numSegments; i++) lightSeg(i);
+    } else if (isActiveSchedule()) {
+      applyAmbient();          // ambient or off
+    } else {
+      turnAllOff();
+    }
+    briAmbient = sv[0]; fxAmbient = sv[1]; palAmbient = sv[2]; psAmbient = sv[3];
+    briBright = sv[4]; psMotion = sv[5]; fxBright = svFxB;
+    if (mot) { for (int i = 0; i < numSegments; i++) segBright[i] = false; litCount = 0; }
     server.send(200, "application/json", "{\"success\":true}");
+  });
+
+  // ── WLED presets list: proxies /presets.json, returns [{id,name}] ──
+  server.on("/presets", HTTP_GET, []() {
+    DynamicJsonDocument out(3072);
+    int code = fetchPresetList(out);
+    if (code != 200) {
+      server.send(code, "application/json", "{\"success\":false,\"presets\":[]}");
+      return;
+    }
+    out["success"] = true;
+    String body;
+    serializeJson(out, body);
+    server.send(200, "application/json", body);
+  });
+
+  // ── Sync: pull per-lantern colors from WLED's current (preset) state into the Brain ──
+  server.on("/presets/sync", []() {
+    colsSaved = false;
+    saveSegmentColors();
+    String body = "{\"success\":";
+    body += colsSaved ? "true" : "false";
+    body += ",\"colors\":[";
+    for (int i = 0; i < numSegments && colsSaved; i++) {
+      char c[24];
+      snprintf(c, sizeof(c), "%s[%d,%d,%d]", i ? "," : "", savedColR[i], savedColG[i], savedColB[i]);
+      body += c;
+    }
+    body += "]}";
+    server.send(200, "application/json", body);
   });
 
   // ── Simulate endpoint ──
@@ -2530,7 +2797,9 @@ void setup() {
   schedWasActive = isActiveSchedule();
   if (schedWasActive) {
     Log.println("Schedule active — setting ambient");
+    refreshPresetNames();
     applyAmbient();
+    if (psAmbient > 0) saveSegmentColors();  // remember the preset's per-lantern colors
   } else {
     Log.println("Schedule inactive — lights off");
     turnAllOff();
@@ -2608,6 +2877,7 @@ void loop() {
       waveState = WAVE_IDLE;
       dimDone   = false;
       clearWavePool();
+      if (!motionActive) startMotionLook();  // preset swap once per motion episode
     }
     // Each triggered sensor starts its own concurrent pool wave
     if (frontRise) {
