@@ -1957,6 +1957,12 @@ async function rescan(){
   btn.disabled=false;btn.textContent='\u21BB Refresh Segments';
 }
 async function apply(){
+  const b=document.getElementById('apply');b.disabled=true;b.textContent='Saving\u2026';
+  let ok=false;try{ok=await apply0();}catch(e){}
+  b.textContent=ok?'\u2713 Saved':'Save failed';b.style.background=ok?'#2ecc71':'#e74c3c';
+  setTimeout(()=>{b.disabled=false;b.textContent='Apply & Save';b.style.background='';},ok?2000:3000);
+}
+async function apply0(){
   const mc=document.getElementById('m-col').value;
   const onTm=t2hm(document.getElementById('sched-on').value);
   const offTm=t2hm(document.getElementById('sched-off').value);
@@ -1994,11 +2000,12 @@ async function apply(){
       const td=await tr.json();
       if(td&&td.reboot){
         m.textContent='Settings saved \u2014 rebooting as '+td.hostname+'.local';
-        return;
+        return true;
       }
     }catch(e){}
     await rescan();
   }
+  return !!d.success;
 }
 let pvOn='';let syncCols=[];
 async function loadPresets(pa,pm){
