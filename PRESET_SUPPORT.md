@@ -64,3 +64,10 @@ New NVS settings (0 = legacy behavior, so nothing changes until a preset is chos
   scales brightness.
 - Presets depend on WLED's segment layout. If someone changes segment counts in WLED, the presets need re-saving.
 - Legacy mode (preset = 0) is unchanged, so nothing breaks until a preset is selected.
+
+## Motion preset swap respects the sensor wave
+When `psMotion` differs from `psAmbient`, `startMotionLook()` loads the motion preset and then
+sets every segment's brightness to 0 (previously `briAmbient`, which lit all lanterns at once).
+The existing directional wave (`lightSeg`) then reveals lanterns one by one: front sensor
+front→back, back sensor back→front, middle sensor outward. Test:
+`TestPresets::test_motion_preset_swap_reveals_by_wave`.
