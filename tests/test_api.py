@@ -846,7 +846,7 @@ class TestPresets:
         t0 = time.time()  # waves finish within the 6 s timeout (WLED calls are slow via NAT)
         while True:
             st = requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()
-            if all(st["segs_bright"]) or time.time() - t0 > 5:
+            if all(st["segs_bright"]) or time.time() - t0 > 8:
                 break
             time.sleep(0.2)
         assert all(st["segs_bright"]), st["segs_bright"]
@@ -866,6 +866,31 @@ class TestPresets:
         requests.get(f"{brain_url}/preview?mode=motion", timeout=CONFIG_TIMEOUT)
         requests.get(f"{brain_url}/rescan", timeout=CONFIG_TIMEOUT)  # Refresh button path
         assert all(s["bri"] == 60 for s in _assert_halloween(brain_url))
+
+    def test_motion_preset_swap_reveals_by_wave(self, brain_url):
+        # Swapped-in motion preset must not light every lantern at once: unreached
+        # segments stay dark and the front wave reveals them in order.
+        _post(brain_url, psAmbient=1, psMotion=2, waveDelay=800)
+        time.sleep(1)
+        requests.get(f"{brain_url}/simulate?sensor=front", timeout=TIMEOUT)
+        lit = lambda s: s["bri"] == 255 and s.get("on", True)
+        partial, t0 = False, time.time()
+        while time.time() - t0 < 8 and not partial:
+            segs = _wled_state(brain_url)["seg"]
+            partial = lit(segs[0]) and not lit(segs[-1])
+            if lit(segs[-1]):
+                break
+            time.sleep(0.2)
+        assert partial, [(s["id"], s["bri"], s.get("on")) for s in segs]
+        t0 = time.time()
+        while time.time() - t0 < 12:
+            if all(requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()["segs_bright"]):
+                break
+            time.sleep(0.3)
+        segs = _assert_halloween(brain_url)
+        assert all(s["bri"] == 255 for s in segs)
+        requests.get(f"{brain_url}/simulate?sensor=clear", timeout=TIMEOUT)
+        _wait_idle(brain_url, 40)
 
     def test_html_has_preset_ui(self, brain_url):
         t = requests.get(f"{brain_url}/", timeout=TIMEOUT).text

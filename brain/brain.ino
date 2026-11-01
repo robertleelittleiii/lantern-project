@@ -468,7 +468,9 @@ bool motionSwapsPreset() { return psMotion > 0 && psMotion != psAmbient; }
 void startMotionLook() {
   if (!motionSwapsPreset()) return;
   applyPreset(psMotion);
-  setAllSegBri(briAmbient);  // wave then reveals lanterns one by one
+  // Preset loads every segment lit; blank them so the sensor wave (lightSeg) reveals
+  // lanterns one by one in its direction instead of all at once.
+  setAllSegBri(0);
 }
 
 // ── Directional wave helpers ─────────────────────────────────────────────────
