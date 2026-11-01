@@ -16,7 +16,8 @@ import time
 import pytest
 import requests
 
-BRAIN_IP       = os.environ.get("BRAIN_IP", "192.168.1.239")
+BRAIN_IP       = os.environ.get("BRAIN_IP", "192.168.1.239")  # override: BRAIN_IP=192.168.4.x
+WLED_IP        = os.environ.get("WLED_IP")  # default: the Brain's configured WLED host (/status wled)
 BASE_URL       = f"http://{BRAIN_IP}"
 TIMEOUT        = 10   # seconds — status/config GET, simulator, web UI
 CONFIG_TIMEOUT = 30   # seconds — config POST (triggers blocking WLED calls for all segments)
@@ -734,3 +735,151 @@ class TestOtaEndpoint:
         assert "current" in data
         assert "update" in data
         assert "checked" in data
+
+
+# ── WLED preset support (psAmbient / psMotion) ────────────────────────────────
+# Presets are referenced by numeric ID. Expected live layout: 1 "Master", 2 "Halloween"
+# (even segments purple 128,0,128, odd segments orange 255,165,0), 10 segments.
+
+PURPLE, ORANGE = [128, 0, 128], [255, 165, 0]
+WARM_WHITE, WHITE = [255, 248, 247], [255, 255, 255]
+
+
+def _wled_ip(brain_url):
+    env = os.environ.get("WLED_IP")
+    if env:
+        return env
+    return requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()["wled"]
+
+
+def _wled_state(brain_url):
+    return requests.get(f"http://{_wled_ip(brain_url)}/json/state", timeout=TIMEOUT).json()
+
+
+def _assert_halloween(brain_url):
+    segs = _wled_state(brain_url)["seg"]
+    for s in segs:
+        col = list(s["col"][0][:3])
+        assert col not in (WARM_WHITE, WHITE), f"seg {s['id']} overwritten to {col}"
+        assert col == (PURPLE if s["id"] % 2 == 0 else ORANGE), f"seg {s['id']} = {col}"
+    return segs
+
+
+def _post(brain_url, **kw):
+    r = requests.post(f"{brain_url}/config", json=kw, timeout=CONFIG_TIMEOUT)
+    assert r.status_code == 200 and r.json()["success"] is True
+
+
+def _wait_idle(brain_url, limit=30):
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        st = requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()
+        if not st["motion"] and not any(st["segs_bright"]):
+            return st
+        time.sleep(0.5)
+    pytest.fail("Brain did not return to idle")
+
+
+class TestPresets:
+
+    @pytest.fixture(autouse=True)
+    def preset_mode(self, brain_url, restore_config):
+        requests.get(f"{brain_url}/simulate?sensor=clear", timeout=TIMEOUT)
+        _post(brain_url, psAmbient=2, psMotion=0, briAmbient=60, briBright=255,
+              motionTimeout=1500, waveDelay=100, colBrightEnable=False)
+        time.sleep(1)
+        yield
+        requests.get(f"{brain_url}/simulate?sensor=clear", timeout=TIMEOUT)
+        keep = {k: restore_config[k] for k in
+                ("psAmbient", "psMotion", "briAmbient", "briBright", "motionTimeout",
+                 "waveDelay", "colBrightEnable") if k in restore_config}
+        keep.setdefault("psAmbient", 0); keep.setdefault("psMotion", 0)
+        _post(brain_url, **keep)
+
+    def test_config_roundtrip_ids(self, brain_url):
+        _post(brain_url, psAmbient=2, psMotion=1)
+        c = requests.get(f"{brain_url}/config", timeout=TIMEOUT).json()
+        assert c["psAmbient"] == 2 and c["psMotion"] == 1
+        assert isinstance(c["psAmbient"], int)
+        assert "Halloween" in c["psAmbientName"] and "Master" in c["psMotionName"]
+        _post(brain_url, psMotion=0)
+        assert requests.get(f"{brain_url}/config", timeout=TIMEOUT).json()["psMotion"] == 0
+
+    def test_missing_preset_label(self, brain_url):
+        _post(brain_url, psMotion=99)
+        c = requests.get(f"{brain_url}/config", timeout=TIMEOUT).json()
+        assert c["psMotionName"] == "Preset 99 (missing)"
+        _post(brain_url, psMotion=0)
+
+    def test_presets_endpoint(self, brain_url):
+        d = requests.get(f"{brain_url}/presets", timeout=TIMEOUT).json()
+        assert d["success"] is True
+        names = {p["id"]: p["name"] for p in d["presets"]}
+        assert names.get(1, "").strip() == "Master"
+        assert names.get(2, "").strip() == "Halloween"
+        assert all(isinstance(p["id"], int) for p in d["presets"])
+
+    def test_ambient_preset_colors_and_brightness(self, brain_url):
+        segs = _assert_halloween(brain_url)
+        assert all(s["bri"] == 60 for s in segs), [s["bri"] for s in segs]
+        assert _wled_state(brain_url)["ps"] == 2
+
+    def test_sync_colors(self, brain_url):
+        d = requests.get(f"{brain_url}/presets/sync", timeout=TIMEOUT).json()
+        assert d["success"] is True
+        assert d["colors"][0] == PURPLE and d["colors"][1] == ORANGE
+
+    @pytest.mark.parametrize("sensors,check", [
+        (["front"], "seq"), (["back"], "seq"), (["middle"], "mid"), (["front", "back"], "conv")])
+    def test_wave_scenarios_keep_colors(self, brain_url, sensors, check):
+        for s in sensors:
+            requests.get(f"{brain_url}/simulate?sensor={s}", timeout=TIMEOUT)
+        time.sleep(0.4)
+        early = requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()["segs_bright"]
+        assert any(early)
+        if check == "seq" and not all(early):
+            lit = [i for i, b in enumerate(early) if b]
+            if sensors == ["front"]:
+                assert lit[0] == 0
+            else:
+                assert lit[-1] == len(early) - 1
+        time.sleep(1.5)  # waves of 10 x 100 ms complete
+        st = requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()
+        assert all(st["segs_bright"]), st["segs_bright"]
+        segs = _assert_halloween(brain_url)
+        assert all(s["bri"] == 255 for s in segs)
+        requests.get(f"{brain_url}/simulate?sensor=clear", timeout=TIMEOUT)
+        _wait_idle(brain_url)
+        segs = _assert_halloween(brain_url)
+        assert all(s["bri"] == 60 for s in segs)
+
+    def test_preview_preserves_colors_and_off_returns(self, brain_url):
+        requests.get(f"{brain_url}/preview?mode=motion", timeout=CONFIG_TIMEOUT)
+        segs = _assert_halloween(brain_url)
+        assert all(s["bri"] == 255 for s in segs)
+        requests.get(f"{brain_url}/preview?mode=ambient", timeout=CONFIG_TIMEOUT)
+        assert all(s["bri"] == 60 for s in _assert_halloween(brain_url))
+        requests.get(f"{brain_url}/preview?mode=motion", timeout=CONFIG_TIMEOUT)
+        requests.get(f"{brain_url}/rescan", timeout=CONFIG_TIMEOUT)  # Refresh button path
+        assert all(s["bri"] == 60 for s in _assert_halloween(brain_url))
+
+    def test_html_has_preset_ui(self, brain_url):
+        t = requests.get(f"{brain_url}/", timeout=TIMEOUT).text
+        assert 'id="a-ps"' in t and 'id="m-ps"' in t and "syncPreset" in t
+
+
+class TestLegacyMode:
+    """psAmbient=psMotion=0 keeps the old per-segment painting and staggered wave."""
+
+    def test_legacy_wave_staggers(self, brain_url, restore_config):
+        _post(brain_url, psAmbient=0, psMotion=0, waveDelay=400, motionTimeout=1500)
+        requests.get(f"{brain_url}/simulate?sensor=front", timeout=TIMEOUT)
+        time.sleep(0.6)
+        st = requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()
+        assert st["segs_bright"][0] and not all(st["segs_bright"])
+        requests.get(f"{brain_url}/simulate?sensor=clear", timeout=TIMEOUT)
+        _wait_idle(brain_url, 40)
+        c = requests.get(f"{brain_url}/config", timeout=TIMEOUT).json()
+        segs = _wled_state(brain_url)["seg"]
+        assert all(s["fx"] == c["fxAmbient"] for s in segs)
+        _post(brain_url, **{k: restore_config[k] for k in ("waveDelay", "motionTimeout")})

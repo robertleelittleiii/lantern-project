@@ -118,6 +118,8 @@ Earlier snapshot:
 - 10-second software timeout works well for walkway use case
 
 ### WLED Presets
+- Nov 2026: Brain supports presets (psAmbient/psMotion, NVS v4). Preset mode = brightness-only segment writes;
+  motion preset (if different) snaps once at motion start; trailing dim returns to ambient preset. WLED now 192.168.4.3.
 - Presets are referenced by numeric ID, not name — easy to mislabel in WLED UI
 - Preset brightness must be configured explicitly — defaults may not match expectations
 - Segment colors must be set per-segment (new segments default to pure white [255,255,255])
