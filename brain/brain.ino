@@ -453,7 +453,41 @@ int fetchPresetList(JsonDocument& out) {
   return 200;
 }
 
+// Motion preset as a direct WLED state with every segment off, so it loads dark in ONE
+// request (no {"ps":id} flash). Cached; cleared whenever preset names are refreshed.
+String darkPresetBody; int darkPresetId = 0;
+bool buildDarkPreset(int id) {
+  if (darkPresetId == id && darkPresetBody.length()) return true;
+  darkPresetBody = ""; darkPresetId = 0;
+  ensureWiFi();
+  if (WiFi.status() != WL_CONNECTED) return false;
+  HTTPClient http;
+  char url[64], key[8];
+  snprintf(url, sizeof(url), "http://%s/presets.json", wledIP.c_str());
+  snprintf(key, sizeof(key), "%d", id);
+  http.begin(url);
+  http.setTimeout(5000);
+  if (http.GET() != 200) { http.end(); return false; }
+  StaticJsonDocument<64> filter;
+  filter[key] = true;
+  DynamicJsonDocument doc(12288);
+  DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  JsonObject p = doc[key];
+  if (err || p.isNull() || !p["seg"].is<JsonArray>()) return false;
+  p.remove("n");
+  JsonArray segs = p["seg"];
+  for (int i = segs.size() - 1; i >= 0; i--) {
+    if ((int)(segs[i]["stop"] | 0) <= 0) segs.remove(i);  // drop empty stubs
+    else segs[i]["on"] = false;
+  }
+  serializeJson(p, darkPresetBody);
+  darkPresetId = id;
+  return true;
+}
+
 void refreshPresetNames() {
+  darkPresetBody = ""; darkPresetId = 0;
   if (psAmbient <= 0 && psMotion <= 0) return;
   DynamicJsonDocument tmp(3072);
   fetchPresetList(tmp);
@@ -467,9 +501,10 @@ bool motionSwapsPreset() { return psMotion > 0 && psMotion != psAmbient; }
 // Called once when a fresh motion episode starts: snap to the motion preset if it differs.
 void startMotionLook() {
   if (!motionSwapsPreset()) return;
-  applyPreset(psMotion);
-  // Preset loads every segment lit; blank them so the sensor wave (lightSeg) reveals
-  // lanterns one by one in its direction instead of all at once.
+  // Load the motion preset already dark so the sensor wave (lightSeg) reveals lanterns
+  // one by one in its direction; {"ps":id} would show every segment lit first.
+  if (buildDarkPreset(psMotion) && wledPostState(darkPresetBody.c_str(), darkPresetBody.length())) return;
+  applyPreset(psMotion);  // fallback: old two-step path
   setAllSegBri(0);
 }
 

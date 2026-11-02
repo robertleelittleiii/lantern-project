@@ -877,6 +877,8 @@ class TestPresets:
         partial, t0 = False, time.time()
         while time.time() - t0 < 8 and not partial:
             segs = _wled_state(brain_url)["seg"]
+            on = [lit(s) for s in segs]
+            assert on[0] or not any(on), f"flash: {on}"  # front wave: nothing lit before seg 0
             partial = lit(segs[0]) and not lit(segs[-1])
             if lit(segs[-1]):
                 break

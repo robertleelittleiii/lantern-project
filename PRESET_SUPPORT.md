@@ -71,3 +71,10 @@ sets every segment's brightness to 0 (previously `briAmbient`, which lit all lan
 The existing directional wave (`lightSeg`) then reveals lanterns one by one: front sensor
 front→back, back sensor back→front, middle sensor outward. Test:
 `TestPresets::test_motion_preset_swap_reveals_by_wave`.
+
+## No flash before the chase
+`startMotionLook()` no longer sends `{"ps":id}` (which showed every lantern lit for a moment).
+`buildDarkPreset()` fetches that preset's entry from WLED `/presets.json`, drops empty segment
+stubs, sets every segment `"on":false`, and posts it as a direct state in one request; the wave
+then turns segments on. The body is cached and cleared by `refreshPresetNames()`. Falls back to
+the old ps + blank path if the fetch fails.
