@@ -869,9 +869,12 @@ class TestPresets:
 
     def test_motion_preset_swap_reveals_by_wave(self, brain_url):
         # Swapped-in motion preset must not light every lantern at once: unreached
-        # segments stay dark and the front wave reveals them in order.
-        _post(brain_url, psAmbient=1, psMotion=2, waveDelay=800)
-        time.sleep(1)
+        # lanterns keep the ambient look (no dark blink) until the front wave reaches them.
+        _post(brain_url, psAmbient=1, psMotion=2, waveDelay=800, motionTimeout=15000)
+        _wait_idle(brain_url, 40)
+        t0 = time.time()  # ambient settled: every lantern at briAmbient before the trip
+        while any(s["bri"] != 60 for s in _wled_state(brain_url)["seg"]) and time.time() - t0 < 10:
+            time.sleep(0.3)
         requests.get(f"{brain_url}/simulate?sensor=front", timeout=TIMEOUT)
         lit = lambda s: s["bri"] == 255 and s.get("on", True)
         partial, t0 = False, time.time()
@@ -879,13 +882,14 @@ class TestPresets:
             segs = _wled_state(brain_url)["seg"]
             on = [lit(s) for s in segs]
             assert on[0] or not any(on), f"flash: {on}"  # front wave: nothing lit before seg 0
+            assert all(s.get("on", True) for s in segs), "blink: unreached lanterns went dark"
             partial = lit(segs[0]) and not lit(segs[-1])
             if lit(segs[-1]):
                 break
             time.sleep(0.2)
         assert partial, [(s["id"], s["bri"], s.get("on")) for s in segs]
         t0 = time.time()
-        while time.time() - t0 < 12:
+        while time.time() - t0 < 20:
             if all(requests.get(f"{brain_url}/status", timeout=TIMEOUT).json()["segs_bright"]):
                 break
             time.sleep(0.3)

@@ -453,12 +453,15 @@ int fetchPresetList(JsonDocument& out) {
   return 200;
 }
 
-// Motion preset as a direct WLED state with every segment off, so it loads dark in ONE
-// request (no {"ps":id} flash). Cached; cleared whenever preset names are refreshed.
-String darkPresetBody; int darkPresetId = 0;
+// Per-segment definitions of the motion preset (without on/bri/sel), so lightSeg can switch
+// ONE lantern from the ambient look to the preset look as the wave reaches it. Nothing is
+// sent at motion start, so unreached lanterns keep the ambient look (no blink/flash).
+// Cached; cleared whenever preset names are refreshed.
+String presetSeg[MAX_SEG]; int darkPresetId = 0;
+void clearPresetSegs() { for (int i = 0; i < MAX_SEG; i++) presetSeg[i] = ""; darkPresetId = 0; }
 bool buildDarkPreset(int id) {
-  if (darkPresetId == id && darkPresetBody.length()) return true;
-  darkPresetBody = ""; darkPresetId = 0;
+  if (darkPresetId == id) return true;
+  clearPresetSegs();
   ensureWiFi();
   if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http;
@@ -475,19 +478,18 @@ bool buildDarkPreset(int id) {
   http.end();
   JsonObject p = doc[key];
   if (err || p.isNull() || !p["seg"].is<JsonArray>()) return false;
-  p.remove("n");
-  JsonArray segs = p["seg"];
-  for (int i = segs.size() - 1; i >= 0; i--) {
-    if ((int)(segs[i]["stop"] | 0) <= 0) segs.remove(i);  // drop empty stubs
-    else segs[i]["on"] = false;
+  for (JsonObject sg : p["seg"].as<JsonArray>()) {
+    int sid = sg["id"] | -1;
+    if (sid < 0 || sid >= MAX_SEG || (int)(sg["stop"] | 0) <= 0) continue;  // skip stubs
+    sg.remove("on"); sg.remove("bri"); sg.remove("sel");
+    serializeJson(sg, presetSeg[sid]);
   }
-  serializeJson(p, darkPresetBody);
   darkPresetId = id;
   return true;
 }
 
 void refreshPresetNames() {
-  darkPresetBody = ""; darkPresetId = 0;
+  clearPresetSegs();
   if (psAmbient <= 0 && psMotion <= 0) return;
   DynamicJsonDocument tmp(3072);
   fetchPresetList(tmp);
@@ -501,9 +503,9 @@ bool motionSwapsPreset() { return psMotion > 0 && psMotion != psAmbient; }
 // Called once when a fresh motion episode starts: snap to the motion preset if it differs.
 void startMotionLook() {
   if (!motionSwapsPreset()) return;
-  // Load the motion preset already dark so the sensor wave (lightSeg) reveals lanterns
-  // one by one in its direction; {"ps":id} would show every segment lit first.
-  if (buildDarkPreset(psMotion) && wledPostState(darkPresetBody.c_str(), darkPresetBody.length())) return;
+  // Cache the preset's segments; lightSeg reveals them one by one in the wave direction.
+  // ({"ps":id} would light every lantern at once.)
+  if (buildDarkPreset(psMotion)) return;
   applyPreset(psMotion);  // fallback: old two-step path
   setAllSegBri(0);
 }
@@ -516,7 +518,10 @@ void lightSeg(int seg) {
   if (litCount >= MAX_SEG) return;  // bounds guard — prevents litOrder[] overflow
   if (motionPresetMode()) {
     // Preset mode: brightness only, preset colors/effect survive (override only if explicitly on)
-    if (colBrightEnable) setSegBri(seg, briBright, colBrightR, colBrightG, colBrightB);
+    if (!colBrightEnable && motionSwapsPreset() && darkPresetId == psMotion && presetSeg[seg].length()) {
+      String b = String("{\"seg\":[{\"on\":true,\"bri\":") + briBright + "," + presetSeg[seg].substring(1) + "]}";
+      wledPostState(b.c_str(), b.length());  // this lantern switches to the motion preset look
+    } else if (colBrightEnable) setSegBri(seg, briBright, colBrightR, colBrightG, colBrightB);
     else                 setSegBri(seg, briBright);
   } else if (colBrightEnable)
     setSegment(seg, briBright, fxBright, -1, colBrightR, colBrightG, colBrightB);

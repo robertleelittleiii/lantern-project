@@ -73,8 +73,11 @@ front→back, back sensor back→front, middle sensor outward. Test:
 `TestPresets::test_motion_preset_swap_reveals_by_wave`.
 
 ## No flash before the chase
-`startMotionLook()` no longer sends `{"ps":id}` (which showed every lantern lit for a moment).
-`buildDarkPreset()` fetches that preset's entry from WLED `/presets.json`, drops empty segment
-stubs, sets every segment `"on":false`, and posts it as a direct state in one request; the wave
-then turns segments on. The body is cached and cleared by `refreshPresetNames()`. Falls back to
-the old ps + blank path if the fetch fails.
+Posting the whole motion preset at motion start (even with every segment `"on":false`) made all
+lanterns crossfade to the preset's solid full-bright look during WLED's 700 ms transition, so the
+path flashed bright before the chase. Now `startMotionLook()` only caches each segment of the
+motion preset from WLED `/presets.json` (`buildDarkPreset()`, cleared by `refreshPresetNames()`),
+and `lightSeg()` switches just the lantern the wave reaches to its preset look
+(`{"seg":[{"on":true,"bri":briBright,...preset seg...}]}`). Unreached lanterns keep the ambient
+look. Falls back to the old ps + blank path if the fetch fails. The first trip after boot or a
+settings change waits ~0.9 s for the fetch.
